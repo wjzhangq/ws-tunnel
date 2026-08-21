@@ -1,0 +1,5 @@
+bin/
+config.yaml
+*.log
+.gitnexus
+.claude/skills

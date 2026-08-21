@@ -1,0 +1,47 @@
+# tunnel-server 配置示例
+#
+# 改动本文件后无需重启:进程监控文件变化(200ms 去抖),也可以 `kill -HUP <pid>`。
+# 变更按 diff 增量应用,没受影响的连接完全无感知。
+
+# WS 接入地址,所有 client 连这里。纯明文 ws,不做 TLS。
+# 安全边界:key 明文过网,listen 只应暴露在可信网络(内网 / VPN / 专线)。
+listen: ":8443"
+
+# /status 与 /metrics 的监听地址;留空则不开启。
+status_listen: "127.0.0.1:8090"
+
+settings:
+  # 控制通道 ping/pong 间隔;连续 heartbeat×3 无响应判定控制通道死亡。
+  # 数据通道保活由 smux keepalive 负责。
+  heartbeat: 15s
+  # 开流超时:写完流头后等 client 回 1 字节 ack 的时限。
+  dial_timeout: 10s
+  # 所有数据通道都打满时,新连接的排队上限。
+  queue_timeout: 5s
+  # 单条数据通道的最大并发流(全局值,无 node 级覆盖)。
+  max_streams_per_conn: 256
+
+# ── node 管理:只放身份与容量 ────────────────────────────────
+# 运行时状态(是否在线、连接/离线时间)不写回本文件,只在 /status 呈现。
+nodes:
+  node1:
+    key: "xx1"      # 全局唯一;重复时保留文档中先出现的那条,后者丢弃并打 WARN
+    channels: 4     # 固定数据通道数,运行期不增减(默认 4)
+  node2:
+    key: "xx2"
+    channels: 2
+
+# ── 端口映射 ─────────────────────────────────────────────
+# key = server 反向监听端口号(纯数字),同时也是流头里的端口 id。
+# 绑定地址固定为 127.0.0.1,不可配:外部流量必须来自 server 本机
+# (或本机上的前置 L4 代理)。
+ports:
+  19080:
+    node: node1
+    remote: "127.0.0.1:8080"    # client 侧本地地址
+  15432:
+    node: node1
+    remote: "127.0.0.1:5432"
+  1980:
+    node: node2
+    remote: "127.0.0.1:80"
