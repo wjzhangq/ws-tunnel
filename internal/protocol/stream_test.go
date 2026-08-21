@@ -32,7 +32,9 @@ func TestStreamHeaderRoundTrip(t *testing.T) {
 }
 
 func TestStreamHeaderRejects(t *testing.T) {
-	if _, err := ReadStreamHeader(bytes.NewReader([]byte{0x02, 0x01})); !errors.Is(err, ErrBadVersion) {
+	// One past the current version: still unknown, and it stays unknown when
+	// StreamVersion is bumped again.
+	if _, err := ReadStreamHeader(bytes.NewReader([]byte{StreamVersion + 1, 0x01})); !errors.Is(err, ErrBadVersion) {
 		t.Fatalf("expected ErrBadVersion, got %v", err)
 	}
 	// Port id 0 is out of the 1..65535 range.

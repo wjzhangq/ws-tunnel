@@ -106,9 +106,12 @@ func TestForwardDoesNotWaitForTheAck(t *testing.T) {
 	// bytes must arrive anyway.
 	go func() { _, _ = caller.Write([]byte("EHLO first\n")) }()
 
+	// The payload rides inside a length-delimited frame (§7.1, StreamVersion
+	// 0x02), so read it the way a real tunnel-client would.
+	fr := protocol.NewFrameReader(st)
 	buf := make([]byte, 11)
 	_ = st.SetReadDeadline(time.Now().Add(3 * time.Second))
-	if _, err := io.ReadFull(st, buf); err != nil {
+	if _, err := io.ReadFull(fr, buf); err != nil {
 		t.Fatalf("payload did not arrive before the ack: %v", err)
 	}
 	_ = st.SetReadDeadline(time.Time{})
@@ -120,7 +123,8 @@ func TestForwardDoesNotWaitForTheAck(t *testing.T) {
 	if err := protocol.WriteAck(st, protocol.AckOK); err != nil {
 		t.Fatalf("write ack: %v", err)
 	}
-	if _, err := st.Write([]byte("250 OK\n")); err != nil {
+	fw := protocol.NewFrameWriter(st)
+	if _, err := fw.Write([]byte("250 OK\n")); err != nil {
 		t.Fatalf("write response: %v", err)
 	}
 	reply := make([]byte, 7)
@@ -132,6 +136,9 @@ func TestForwardDoesNotWaitForTheAck(t *testing.T) {
 		t.Fatalf("reply = %q", reply)
 	}
 
+	// End-of-direction in band first, so forward()'s FrameReader sees a clean
+	// io.EOF at a frame boundary rather than a truncated frame.
+	_ = fw.CloseWrite()
 	_ = st.Close()
 	_ = caller.Close()
 	<-done

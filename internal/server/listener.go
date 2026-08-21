@@ -326,14 +326,18 @@ func (s *Server) forward(pl *portListener, conn net.Conn) {
 	}
 
 	// Pipeline the external bytes immediately — we do not wait for the ack,
-	// so nothing is added to first-byte latency (§7.1).
+	// so nothing is added to first-byte latency (§7.1). The ack is read on this
+	// goroutine before the copy starts, so a short request that finishes early
+	// can never race the ack away.
+	fw := protocol.NewFrameWriter(st)
 	upDone := make(chan struct{})
 	go func() {
 		defer close(upDone)
-		n, _ := io.Copy(st, conn)
+		n, _ := io.Copy(fw, conn)
 		stats.BytesIn.Add(n)
-		// Half-close so the client's local service sees EOF.
-		_ = st.Close()
+		// Signal end-of-direction in-band. Closing the stream here would also
+		// kill our read side (smux has no half-close) and drop the response.
+		_ = fw.CloseWrite()
 	}()
 
 	_ = st.SetReadDeadline(time.Now().Add(sess.DialTimeout()))
@@ -358,8 +362,15 @@ func (s *Server) forward(pl *portListener, conn net.Conn) {
 	}
 
 	stats.RecordResult("ok")
-	n, _ := io.Copy(conn, st)
+	n, _ := io.Copy(conn, protocol.NewFrameReader(st))
 	stats.BytesOut.Add(n)
-	_ = conn.Close()
+	// Relay the peer's end-of-direction as a real FIN so the external client
+	// sees EOF while it may still be sending.
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.CloseWrite()
+	} else {
+		_ = conn.Close()
+	}
 	<-upDone
+	_ = conn.Close()
 }

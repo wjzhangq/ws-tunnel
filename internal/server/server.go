@@ -122,6 +122,7 @@ func (s *Server) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("status listener: %w", err)
 		}
+		s.warnIfExposed(cfg.StatusListen)
 		s.srvMu.Lock()
 		s.statusSrv = statusSrv
 		s.srvMu.Unlock()
@@ -159,8 +160,10 @@ func (s *Server) wsHandler() http.Handler {
 	return mux
 }
 
-// statusHandler serves §13's read-only telemetry. It carries no authentication,
-// which is why config.go pins it to loopback.
+// statusHandler serves §13's read-only telemetry. It carries no authentication
+// and status_listen is NOT pinned to loopback — config.go only reserves its port
+// against the ports: map. Binding it to a non-loopback address therefore exposes
+// node names, port topology and traffic counters to that network.
 func (s *Server) statusHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", s.handleStatus)
@@ -193,6 +196,27 @@ func (s *Server) serve(what, addr string, h http.Handler) (*http.Server, error) 
 		}
 	}()
 	return srv, nil
+}
+
+// warnIfExposed flags an unauthenticated status endpoint bound off loopback.
+// status_listen is operator-supplied and passed straight to net.Listen, so this
+// is the only signal that the telemetry is reachable from the network.
+func (s *Server) warnIfExposed(addr string) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return
+	}
+	if host == "" {
+		s.log.Warn("status endpoint is unauthenticated and bound to all interfaces; "+
+			"anyone who can reach it can read node names, port topology and traffic counters",
+			"addr", addr)
+		return
+	}
+	if ip := net.ParseIP(host); ip != nil && !ip.IsLoopback() {
+		s.log.Warn("status endpoint is unauthenticated and not on loopback; "+
+			"anyone who can reach it can read node names, port topology and traffic counters",
+			"addr", addr)
+	}
 }
 
 // ─── WS entry point ──────────────────────────────────────────────────────
@@ -597,6 +621,7 @@ func (s *Server) rebindEndpoints(old, newCfg *config.Config) {
 				"from", old.StatusListen, "to", newCfg.StatusListen, "err", err)
 			return
 		}
+		s.warnIfExposed(newCfg.StatusListen)
 	}
 	s.srvMu.Lock()
 	prev := s.statusSrv

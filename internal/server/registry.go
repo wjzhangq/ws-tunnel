@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 	"github.com/xtaci/smux"
@@ -627,9 +628,14 @@ func randomID() string {
 	return hex.EncodeToString(b[:])
 }
 
+// truncate caps s at n bytes without splitting a UTF-8 rune, which matters
+// because the result goes into a WebSocket close reason.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n]
 }

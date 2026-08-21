@@ -144,7 +144,7 @@ func (c *Client) runSession(ctx context.Context) error {
 	defer c.setCtrl(nil)
 
 	c.Log.Info("control channel up",
-		"node", c.Node, "session", c.session, "channels", cfg.Channels,
+		"node", c.Node, "session", c.Session(), "channels", cfg.Channels,
 		"ports", len(cfg.Ports), "heartbeat", cfg.Heartbeat.D())
 
 	sctx, cancel := context.WithCancel(ctx)
@@ -516,20 +516,25 @@ func (c *Client) handleStream(ctx context.Context, st *smux.Stream) {
 		return
 	}
 
+	fw := protocol.NewFrameWriter(st)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		n, _ := io.Copy(local, st)
+		n, _ := io.Copy(local, protocol.NewFrameReader(st))
 		c.bytesIn.Add(n)
+		// The external client half-closed; pass the FIN on so the local service
+		// sees EOF and can answer on the still-open write side.
 		if tc, ok := local.(*net.TCPConn); ok {
 			_ = tc.CloseWrite()
 		} else {
 			_ = local.Close()
 		}
 	}()
-	n, _ := io.Copy(st, local)
+	n, _ := io.Copy(fw, local)
 	c.bytesOut.Add(n)
-	_ = st.Close()
+	// End-of-direction goes in-band; st.Close is left to the deferred teardown
+	// so the upstream copy above keeps its read side.
+	_ = fw.CloseWrite()
 	wg.Wait()
 }

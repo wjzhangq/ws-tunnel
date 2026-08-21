@@ -8,10 +8,18 @@ import (
 
 // Stream header / ack constants (§7.1).
 //
-//	server → client:  ver(1B) | portID(varint) | raw L4 bytes...
-//	client → server:  status(1B) | raw L4 bytes...
+//	server → client:  ver(1B) | portID(varint) | framed L4 bytes...
+//	client → server:  status(1B) | framed L4 bytes...
+//
+// The payload is framed rather than raw because smux has no half-close:
+// Stream.Close sends cmdFIN *and* closes the local read side in the same call,
+// so relaying a TCP FIN by closing the stream would discard the peer's reply.
+// See FrameWriter / FrameReader.
 const (
-	StreamVersion byte = 0x01
+	// StreamVersion 0x02 introduced the framed payload. A 0x01 peer reads the
+	// ver byte, fails ErrBadVersion and drops the stream, so a version skew
+	// refuses connections instead of corrupting them.
+	StreamVersion byte = 0x02
 
 	AckOK             byte = 0x00 // dialed the local service, forwarding
 	AckPortNotAllowed byte = 0x01 // port id not in the pushed allow-list
