@@ -1,0 +1,81 @@
+name: release
+
+# 只在 tag 上跑。tag 决定版本号:产物里 --version 打印的就是这个值。
+on:
+  push:
+    tags:
+      - 'v*'
+
+# 创建 release 需要写 contents,其余权限一概不给。
+permissions:
+  contents: write
+
+jobs:
+  # 先测再发:tag 推上来才发现测试是红的,比不发版更糟。
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: verify formatting
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+      - run: go vet ./...
+
+      - run: go test ./... -race -count=1 -timeout 600s
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 是为了让 git describe 能看到 tag 历史。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # server 只出 linux,client 出 linux/windows/darwin;详见脚本内注释。
+      - name: build artifacts
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: ./scripts/build-release.sh
+
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        # 带连字符的 tag(v1.0.0-rc1)标记为 prerelease。
+        run: |
+          notes=$(mktemp)
+          {
+            printf '## 下载\n\n'
+            printf '| 组件 | 平台 | 文件 |\n|---|---|---|\n'
+            printf '| server | linux/amd64 | `tunnel-server_%s_linux_amd64.tar.gz` |\n' "$VERSION"
+            printf '| server | linux/arm64 | `tunnel-server_%s_linux_arm64.tar.gz` |\n' "$VERSION"
+            printf '| client | linux/amd64 | `tunnel-client_%s_linux_amd64.tar.gz` |\n' "$VERSION"
+            printf '| client | linux/arm64 | `tunnel-client_%s_linux_arm64.tar.gz` |\n' "$VERSION"
+            printf '| client | darwin/amd64 | `tunnel-client_%s_darwin_amd64.tar.gz` |\n' "$VERSION"
+            printf '| client | darwin/arm64 | `tunnel-client_%s_darwin_arm64.tar.gz` |\n' "$VERSION"
+            printf '| client | windows/amd64 | `tunnel-client_%s_windows_amd64.zip` |\n' "$VERSION"
+            printf '| client | windows/arm64 | `tunnel-client_%s_windows_arm64.zip` |\n' "$VERSION"
+            printf '\nserver 只提供 linux 版本。校验:`sha256sum -c SHA256SUMS`\n'
+          } > "$notes"
+
+          prerelease=""
+          case "$VERSION" in *-*) prerelease="--prerelease";; esac
+
+          gh release create "$VERSION" \
+            --title "$VERSION" \
+            --notes-file "$notes" \
+            --generate-notes \
+            $prerelease \
+            dist/*.tar.gz dist/*.zip dist/SHA256SUMS

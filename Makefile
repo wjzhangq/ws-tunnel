@@ -3,7 +3,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 BIN     := bin
 
-.PHONY: all deps build server client test race vet fmt lint clean run-server run-client
+.PHONY: all deps build server client test race vet fmt lint clean release run-server run-client
 
 all: build
 
@@ -32,6 +32,10 @@ linux-arm64:
 	GOOS=linux GOARCH=arm64 go build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN)/tunnel-client-linux-arm64 ./cmd/tunnel-client
 	GOOS=linux GOARCH=arm64 go build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN)/tunnel-server-linux-arm64 ./cmd/tunnel-server
 
+## 本地复现 CI 的发布产物(打 tag 时 GitHub Actions 跑的是同一个脚本)
+release:
+	./scripts/build-release.sh
+
 test:
 	go test ./... -count=1
 
@@ -47,7 +51,7 @@ fmt:
 lint: fmt vet
 
 clean:
-	rm -rf $(BIN)
+	rm -rf $(BIN) dist
 
 run-server: server
 	$(BIN)/tunnel-server -config config.yaml -log-level debug

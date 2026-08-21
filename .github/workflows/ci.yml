@@ -1,0 +1,45 @@
+name: ci
+
+# 平时的检查。tag 上的发布流程见 release.yml,那里会再跑一遍同样的测试。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: verify formatting
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+      - run: go vet ./...
+
+      - run: go build ./...
+
+      - run: go test ./... -race -count=1 -timeout 600s
+
+  # 交叉编译在 PR 阶段就验证,免得 tag 推上去才发现某个平台编不过。
+  cross-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - run: ./scripts/build-release.sh

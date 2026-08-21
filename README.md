@@ -84,3 +84,18 @@ make test    # 单元 + 端到端集成测试
 make race    # 带竞态检测
 make lint    # gofmt + go vet
 ```
+
+## 发布
+
+推一个 `v*` tag,GitHub Actions 就会跑测试并把产物发到 Release:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+`server` 只出 linux(amd64 / arm64),`client` 出 linux、windows、darwin 的 amd64 / arm64,共 8 个包。
+版本号取自 tag,装好后 `--version` 打印的就是它。带连字符的 tag(如 `v1.0.0-rc1`)标记为 prerelease。
+
+`make release` 在本地跑的是同一个脚本(`scripts/build-release.sh`),产物落在 `dist/`,可以先自己验一遍再打 tag。
+下载后校验:`sha256sum -c SHA256SUMS`。
