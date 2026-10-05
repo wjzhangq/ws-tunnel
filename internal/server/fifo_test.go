@@ -16,9 +16,9 @@ import (
 // slot cascades down the queue and `served` is exactly the handoff order.
 func TestOpenStreamQueueIsFIFO(t *testing.T) {
 	const waiters = 8
-	n := newTestSession(t, 1, 1, 5*time.Second)
+	n := newTestSession(t, 1, 5*time.Second)
 
-	st0, ch0, err := n.OpenStream(context.Background())
+	st0, err := n.OpenStream(context.Background(), 19080)
 	if err != nil {
 		t.Fatalf("initial open: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestOpenStreamQueueIsFIFO(t *testing.T) {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			st, ch, err := n.OpenStream(context.Background())
+			st, err := n.OpenStream(context.Background(), 19080)
 			if err != nil {
 				t.Errorf("waiter %d: %v", id, err)
 				return
@@ -41,14 +41,12 @@ func TestOpenStreamQueueIsFIFO(t *testing.T) {
 			mu.Lock()
 			served = append(served, id)
 			mu.Unlock()
-			n.CloseStream(ch, st)
+			n.CloseStream(st)
 		}(i)
-		// Park them one at a time so arrival order is deterministic instead of
-		// depending on goroutine scheduling.
 		waitQueueDepth(t, n, int64(i+1))
 	}
 
-	n.CloseStream(ch0, st0) // releases the slot into the queue
+	n.CloseStream(st0)
 	wg.Wait()
 
 	mu.Lock()
@@ -74,10 +72,10 @@ func TestOpenStreamQueueIsFIFO(t *testing.T) {
 // be used by that waiter rather than dropped, otherwise the slot leaks and the
 // pool shrinks permanently.
 func TestOpenStreamHandoffSurvivesTimeoutRace(t *testing.T) {
-	n := newTestSession(t, 1, 1, 2*time.Millisecond)
+	n := newTestSession(t, 1, 2*time.Millisecond)
 
 	for i := 0; i < 200; i++ {
-		st, ch, err := n.OpenStream(context.Background())
+		st, err := n.OpenStream(context.Background(), 19080)
 		if err != nil {
 			t.Fatalf("iteration %d: initial open: %v", i, err)
 		}
@@ -86,17 +84,14 @@ func TestOpenStreamHandoffSurvivesTimeoutRace(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// Either the handoff wins and this gets a stream, or the timeout
-			// wins and it reports saturation. Both are fine; leaking the slot
-			// is not.
-			if st, ch, err := n.OpenStream(context.Background()); err == nil {
-				n.CloseStream(ch, st)
+			if st, err := n.OpenStream(context.Background(), 19080); err == nil {
+				n.CloseStream(st)
 			} else if err != ErrSaturated {
 				t.Errorf("iteration %d: err = %v, want nil or ErrSaturated", i, err)
 			}
 		}()
 
-		n.CloseStream(ch, st) // races the waiter's queue_timeout
+		n.CloseStream(st)
 		wg.Wait()
 
 		if got := n.ActiveStreams(); got != 0 {
@@ -107,26 +102,25 @@ func TestOpenStreamHandoffSurvivesTimeoutRace(t *testing.T) {
 
 // TestOpenStreamDrainingAndClosed checks the two non-queue exits.
 func TestOpenStreamDrainingAndClosed(t *testing.T) {
-	n := newTestSession(t, 1, 4, time.Second)
+	n := newTestSession(t, 4, time.Second)
 	n.SetDraining(true)
-	if _, _, err := n.OpenStream(context.Background()); err != ErrDraining {
+	if _, err := n.OpenStream(context.Background(), 19080); err != ErrDraining {
 		t.Fatalf("draining: err = %v, want ErrDraining", err)
 	}
 	n.SetDraining(false)
 
-	// Fill the pool, then close the session out from under the waiter.
-	st, ch, err := n.OpenStream(context.Background())
+	st, err := n.OpenStream(context.Background(), 19080)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	for i := 0; i < 3; i++ {
-		if _, _, err := n.OpenStream(context.Background()); err != nil {
+		if _, err := n.OpenStream(context.Background(), 19080); err != nil {
 			t.Fatalf("fill %d: %v", i, err)
 		}
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := n.OpenStream(context.Background())
+		_, err := n.OpenStream(context.Background(), 19080)
 		done <- err
 	}()
 	waitQueueDepth(t, n, 1)
@@ -134,22 +128,22 @@ func TestOpenStreamDrainingAndClosed(t *testing.T) {
 	if err := <-done; err != ErrSessionClosed {
 		t.Fatalf("after close: err = %v, want ErrSessionClosed", err)
 	}
-	n.CloseStream(ch, st)
+	n.CloseStream(st)
 }
 
 // TestOpenStreamContextCancel checks a caller giving up before queue_timeout.
 func TestOpenStreamContextCancel(t *testing.T) {
-	n := newTestSession(t, 1, 1, 10*time.Second)
-	st, ch, err := n.OpenStream(context.Background())
+	n := newTestSession(t, 1, 10*time.Second)
+	st, err := n.OpenStream(context.Background(), 19080)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer n.CloseStream(ch, st)
+	defer n.CloseStream(st)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := n.OpenStream(ctx)
+		_, err := n.OpenStream(ctx, 19080)
 		done <- err
 	}()
 	waitQueueDepth(t, n, 1)

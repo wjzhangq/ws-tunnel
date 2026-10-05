@@ -304,12 +304,12 @@ func (s *Server) forward(pl *portListener, conn net.Conn) {
 		return
 	}
 
-	st, ch, err := sess.OpenStream(s.baseCtx)
+	st, err := sess.OpenStream(s.baseCtx, pl.port)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrSaturated):
 			stats.RecordResult("rejected")
-			s.log.Warn("dropping connection: all channels saturated",
+			s.log.Warn("dropping connection: session saturated",
 				"port", pl.port, "node", pl.node)
 		default:
 			stats.RecordResult("rejected")
@@ -317,37 +317,24 @@ func (s *Server) forward(pl *portListener, conn net.Conn) {
 		}
 		return
 	}
-	defer sess.CloseStream(ch, st)
+	defer sess.CloseStream(st)
 
-	if err := protocol.WriteStreamHeader(st, pl.port); err != nil {
-		stats.RecordResult("rejected")
-		s.log.Warn("write stream header failed", "port", pl.port, "node", pl.node, "err", err)
-		return
-	}
-
-	// Pipeline the external bytes immediately — we do not wait for the ack,
-	// so nothing is added to first-byte latency (§7.1). The ack is read on this
-	// goroutine before the copy starts, so a short request that finishes early
-	// can never race the ack away.
-	fw := protocol.NewFrameWriter(st)
 	upDone := make(chan struct{})
 	go func() {
 		defer close(upDone)
-		n, _ := io.Copy(fw, conn)
+		n, _ := io.Copy(st, conn)
 		stats.BytesIn.Add(n)
-		// Signal end-of-direction in-band. Closing the stream here would also
-		// kill our read side (smux has no half-close) and drop the response.
-		_ = fw.CloseWrite()
+		_ = st.CloseWrite()
 	}()
 
-	_ = st.SetReadDeadline(time.Now().Add(sess.DialTimeout()))
-	status, err := protocol.ReadAck(st)
+	ackCtx, ackCancel := context.WithTimeout(s.baseCtx, sess.DialTimeout())
+	status, err := st.WaitAck(ackCtx)
+	ackCancel()
 	if err != nil {
 		stats.RecordResult("timeout")
 		s.log.Warn("no ack from client", "port", pl.port, "node", pl.node, "err", err)
 		return
 	}
-	_ = st.SetReadDeadline(time.Time{})
 
 	if status != protocol.AckOK {
 		result := protocol.AckResult(status)
@@ -362,10 +349,8 @@ func (s *Server) forward(pl *portListener, conn net.Conn) {
 	}
 
 	stats.RecordResult("ok")
-	n, _ := io.Copy(conn, protocol.NewFrameReader(st))
+	n, _ := io.Copy(conn, st)
 	stats.BytesOut.Add(n)
-	// Relay the peer's end-of-direction as a real FIN so the external client
-	// sees EOF while it may still be sending.
 	if tc, ok := conn.(*net.TCPConn); ok {
 		_ = tc.CloseWrite()
 	} else {

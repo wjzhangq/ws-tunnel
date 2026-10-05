@@ -20,9 +20,9 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/fsnotify/fsnotify"
-	"github.com/xtaci/smux"
 
 	"ws-tunnel/internal/config"
+	"ws-tunnel/internal/mux"
 	"ws-tunnel/internal/protocol"
 	"ws-tunnel/internal/wsutil"
 )
@@ -252,10 +252,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch msg.Role {
-	case protocol.RoleControl:
-		s.serveControl(r.Context(), c, spec, r.RemoteAddr)
+	case "", protocol.RoleControl:
+		s.serveSession(r.Context(), c, spec, r.RemoteAddr)
 	case protocol.RoleData:
-		s.serveData(r.Context(), c, spec, msg)
+		s.reject(c, protocol.ErrBadRequest, "data-role WebSockets are no longer used; streams share the control connection")
 	default:
 		s.reject(c, protocol.ErrBadRequest, "unknown role %q", msg.Role)
 	}
@@ -294,7 +294,7 @@ func (s *Server) reject(c *websocket.Conn, code, format string, args ...any) {
 
 // ─── control channel ─────────────────────────────────────────────────────
 
-func (s *Server) serveControl(ctx context.Context, c *websocket.Conn, spec *config.NodeSpec, remote string) {
+func (s *Server) serveSession(ctx context.Context, c *websocket.Conn, spec *config.NodeSpec, remote string) {
 	cfg := s.Config()
 	nodeCfg := cfg.NodeConfig(spec.Name)
 	if nodeCfg == nil {
@@ -302,11 +302,13 @@ func (s *Server) serveControl(ctx context.Context, c *websocket.Conn, spec *conf
 		return
 	}
 	stats := s.registry.Stats(spec.Name)
-	sess := newNodeSession(spec.Name, c, nodeCfg, cfg.Settings.QueueTimeout, stats, s.log)
+	sess := newNodeSession(spec.Name, nodeCfg, cfg.Settings.QueueTimeout, stats, s.log)
+	sess.AttachMux(mux.New(s.baseCtx, mux.WS{C: c}))
 
 	if err := s.registry.Register(sess); err != nil {
-		s.log.Warn("refusing duplicate control channel", "node", spec.Name, "remote", remote)
-		s.reject(c, protocol.ErrNodeBusy, "node %s already has a control channel", spec.Name)
+		s.log.Warn("refusing duplicate session", "node", spec.Name, "remote", remote)
+		_ = sess.SendControl(protocol.Errorf(protocol.ErrNodeBusy, "node %s already has a session", spec.Name))
+		sess.Close("duplicate")
 		return
 	}
 
@@ -314,7 +316,7 @@ func (s *Server) serveControl(ctx context.Context, c *websocket.Conn, spec *conf
 		Type:      protocol.TypeWelcome,
 		Session:   sess.ID,
 		Heartbeat: nodeCfg.Heartbeat,
-		Channels:  nodeCfg.Channels,
+		Channels:  1,
 		Config:    nodeCfg,
 	}); err != nil {
 		s.registry.Unregister(sess, "welcome write failed: "+err.Error())
@@ -323,7 +325,7 @@ func (s *Server) serveControl(ctx context.Context, c *websocket.Conn, spec *conf
 	}
 
 	s.log.Info("node online", "node", spec.Name, "session", sess.ID,
-		"remote", remote, "channels", nodeCfg.Channels, "ports", len(nodeCfg.Ports))
+		"remote", remote, "ports", len(nodeCfg.Ports))
 	s.listeners.StartNode(spec.Name)
 
 	ctrlCtx, cancel := context.WithCancel(ctx)
@@ -339,8 +341,6 @@ func (s *Server) serveControl(ctx context.Context, c *websocket.Conn, spec *conf
 	go s.pingLoop(ctrlCtx, sess)
 	reason := s.controlReadLoop(ctrlCtx, sess)
 
-	// Control channel gone ⇒ the node goes offline as a whole: listeners are
-	// released, data channels dropped, in-flight forwards closed (§5.1).
 	s.listeners.StopNode(spec.Name, false)
 	s.registry.Unregister(sess, reason)
 	sess.Close(reason)
@@ -348,37 +348,58 @@ func (s *Server) serveControl(ctx context.Context, c *websocket.Conn, spec *conf
 }
 
 func (s *Server) controlReadLoop(ctx context.Context, sess *NodeSession) string {
+	m := sess.Mux()
 	for {
 		timeout := 3 * sess.Heartbeat()
-		rctx, cancel := context.WithTimeout(ctx, timeout)
-		msg, err := wsutil.ReadJSON(rctx, sess.ctrl)
-		cancel()
-		if err != nil {
-			if ctx.Err() != nil {
-				return "server closed the session"
-			}
-			return "control channel closed: " + err.Error()
+		if timeout <= 0 {
+			timeout = 45 * time.Second
 		}
-		sess.Touch(0)
-
-		switch msg.Type {
-		case protocol.TypePing:
-			_ = sess.SendControl(&protocol.Message{Type: protocol.TypePong, Nonce: msg.Nonce, TS: msg.TS})
-		case protocol.TypePong:
-			if msg.TS > 0 {
-				sess.Touch(time.Since(time.Unix(0, msg.TS)))
+		timer := time.NewTimer(timeout)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			if ctx.Err() != nil && sess.Reason() != "" {
+				return sess.Reason()
 			}
-		case protocol.TypeStats:
-			if msg.Stats != nil {
-				sess.SetClientStats(msg.Stats)
-				s.registry.Stats(sess.Name).LocalDialErrors.Store(msg.Stats.LocalDialErrors)
+			return "server closed the session"
+		case <-sess.Done():
+			timer.Stop()
+			if r := sess.Reason(); r != "" {
+				return r
 			}
-		case protocol.TypeBye:
-			return "client said bye: " + msg.Reason
-		case protocol.TypeError:
-			s.log.Warn("client reported an error", "node", sess.Name, "code", msg.Code, "msg", msg.Msg)
-		default:
-			s.log.Debug("ignoring unexpected control message", "node", sess.Name, "type", msg.Type)
+			return "session closed"
+		case <-m.Done():
+			timer.Stop()
+			return "websocket closed"
+		case <-timer.C:
+			if time.Since(m.LastRead()) > timeout {
+				return "control heartbeat timeout"
+			}
+		case msg := <-m.Controls():
+			timer.Stop()
+			if msg == nil {
+				return "control channel closed"
+			}
+			sess.Touch(0)
+			switch msg.Type {
+			case protocol.TypePing:
+				_ = sess.SendControl(&protocol.Message{Type: protocol.TypePong, Nonce: msg.Nonce, TS: msg.TS})
+			case protocol.TypePong:
+				if msg.TS > 0 {
+					sess.Touch(time.Since(time.Unix(0, msg.TS)))
+				}
+			case protocol.TypeStats:
+				if msg.Stats != nil {
+					sess.SetClientStats(msg.Stats)
+					s.registry.Stats(sess.Name).LocalDialErrors.Store(msg.Stats.LocalDialErrors)
+				}
+			case protocol.TypeBye:
+				return "client said bye: " + msg.Reason
+			case protocol.TypeError:
+				s.log.Warn("client reported an error", "node", sess.Name, "code", msg.Code, "msg", msg.Msg)
+			default:
+				s.log.Debug("ignoring unexpected control message", "node", sess.Name, "type", msg.Type)
+			}
 		}
 	}
 }
@@ -411,66 +432,6 @@ func (s *Server) pingLoop(ctx context.Context, sess *NodeSession) {
 			return
 		}
 	}
-}
-
-// ─── data channels ───────────────────────────────────────────────────────
-
-func (s *Server) serveData(ctx context.Context, c *websocket.Conn, spec *config.NodeSpec, hello *protocol.Message) {
-	sess := s.registry.Get(spec.Name)
-	if sess == nil || hello.Session == "" || hello.Session != sess.ID {
-		s.log.Warn("rejecting data channel with a stale session", "node", spec.Name)
-		s.reject(c, protocol.ErrBadSession, "session is unknown or superseded")
-		return
-	}
-
-	id := sess.NextChannelID()
-	hsCtx, hsCancel := context.WithTimeout(ctx, handshakeTimeout)
-	err := wsutil.WriteJSON(hsCtx, c, &protocol.Message{
-		Type: protocol.TypeWelcome, ChannelID: id, Session: sess.ID,
-	})
-	hsCancel()
-	if err != nil {
-		wsutil.Close(c, websocket.StatusInternalError, "welcome write failed")
-		return
-	}
-
-	connCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	nc := wsutil.NetConn(connCtx, c)
-	// The server is the side that opens streams, so it takes the smux client
-	// role; the client takes the server role.
-	msess, err2 := smux.Client(nc, wsutil.SmuxConfig(sess.Heartbeat()))
-	if err2 != nil {
-		s.log.Warn("smux setup failed", "node", spec.Name, "err", err2)
-		wsutil.Close(c, websocket.StatusInternalError, "smux setup failed")
-		return
-	}
-
-	ch := &DataChannel{ID: id, sess: msess, ws: c}
-	sess.AddChannel(ch)
-	s.log.Info("data channel up", "node", spec.Name, "channel", id,
-		"online", sess.OnlineChannels(), "configured", sess.Config().Channels)
-
-	go func() {
-		select {
-		case <-sess.Done():
-			ch.Close()
-		case <-connCtx.Done():
-		}
-	}()
-
-	// The client never opens streams; accepting is only how we notice the
-	// session dying, and it defends against a misbehaving peer.
-	for {
-		st, err := msess.AcceptStream()
-		if err != nil {
-			break
-		}
-		_ = st.Close()
-	}
-
-	sess.RemoveChannel(ch)
-	s.log.Info("data channel down", "node", spec.Name, "channel", id, "online", sess.OnlineChannels())
 }
 
 // ─── config reload ───────────────────────────────────────────────────────

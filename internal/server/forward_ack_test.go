@@ -39,10 +39,7 @@ func TestForwardRecordsAckFailures(t *testing.T) {
 			if st == nil {
 				return
 			}
-			if _, err := protocol.ReadStreamHeader(st); err != nil {
-				t.Fatalf("read stream header: %v", err)
-			}
-			if err := protocol.WriteAck(st, tc.status); err != nil {
+			if err := st.Ack(tc.status); err != nil {
 				t.Fatalf("write ack: %v", err)
 			}
 			_ = st.Close()
@@ -86,9 +83,6 @@ func TestForwardTimesOutWaitingForTheAck(t *testing.T) {
 	st := fx.accept()
 	if st == nil {
 		return
-	}
-	if _, err := protocol.ReadStreamHeader(st); err != nil {
-		t.Fatalf("read stream header: %v", err)
 	}
 	// Never ack.
 

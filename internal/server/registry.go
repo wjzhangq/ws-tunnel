@@ -11,11 +11,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/coder/websocket"
-	"github.com/xtaci/smux"
-
+	"ws-tunnel/internal/mux"
 	"ws-tunnel/internal/protocol"
-	"ws-tunnel/internal/wsutil"
 )
 
 var (
@@ -157,28 +154,9 @@ func (s *NodeStats) Times() (connected, disconnected time.Time, lastErr string) 
 	return s.connectedAt, s.disconnectedAt, s.lastError
 }
 
-// DataChannel is one WS carrying a smux session (§5.2).
-type DataChannel struct {
-	ID     int
-	sess   *smux.Session
-	ws     *websocket.Conn
-	active atomic.Int64
-	closed atomic.Bool
-}
-
-func (c *DataChannel) Close() {
-	if c.closed.Swap(true) {
-		return
-	}
-	if c.sess != nil {
-		_ = c.sess.Close()
-	}
-	wsutil.Close(c.ws, websocket.StatusNormalClosure, "channel closed")
-}
-
-// NodeSession is one live control channel plus the fixed pool of data
-// channels behind it. Its lifetime is the node's online lifetime: when it
-// ends, the node's reverse listeners go with it (§5.1, §9).
+// NodeSession is one live WebSocket (JSON control + muxed L4 streams).
+// Its lifetime is the node's online lifetime: when it ends, the node's
+// reverse listeners go with it.
 type NodeSession struct {
 	Name        string
 	ID          string
@@ -187,26 +165,21 @@ type NodeSession struct {
 	log   *slog.Logger
 	stats *NodeStats
 
-	ctrl   *websocket.Conn
-	ctrlMu sync.Mutex
+	mux *mux.Conn
 
 	cfgMu        sync.RWMutex
 	cfg          *protocol.NodeConfig
 	queueTimeout time.Duration
 
-	chMu     sync.Mutex
-	channels map[int]*DataChannel
-	// waiters is the arrival-ordered queue of requests parked because every
-	// channel was full. A freed slot is handed to waiters[0] under chMu, and a
-	// newcomer that finds the queue non-empty joins the tail instead of
-	// competing for the slot — that is what makes the wait FIFO (§8).
+	chMu sync.Mutex
+	// waiters is the arrival-ordered queue of requests parked because the
+	// session was at max_streams_per_conn. A freed slot is handed to
+	// waiters[0] under chMu, and a newcomer that finds the queue non-empty
+	// joins the tail instead of competing for the slot — FIFO.
 	waiters []*slotWaiter
 
-	// maxStreams mirrors cfg.MaxStreamsPerConn so a slot handoff can read the
-	// current limit without taking cfgMu while holding chMu.
 	maxStreams atomic.Int64
 
-	chanSeq       atomic.Int64
 	activeStreams atomic.Int64
 	queueDepth    atomic.Int64
 	draining      atomic.Bool
@@ -226,11 +199,11 @@ type NodeSession struct {
 // slot was transferred, so a waiter losing the race against its own timeout
 // still finds the slot instead of leaking it.
 type slotWaiter struct {
-	ready  chan *DataChannel
+	ready  chan struct{}
 	handed bool
 }
 
-func newNodeSession(name string, ctrl *websocket.Conn, cfg *protocol.NodeConfig,
+func newNodeSession(name string, cfg *protocol.NodeConfig,
 	queueTimeout time.Duration, stats *NodeStats, log *slog.Logger) *NodeSession {
 
 	n := &NodeSession{
@@ -239,16 +212,16 @@ func newNodeSession(name string, ctrl *websocket.Conn, cfg *protocol.NodeConfig,
 		ConnectedAt:  time.Now(),
 		log:          log,
 		stats:        stats,
-		ctrl:         ctrl,
 		cfg:          cfg,
 		queueTimeout: queueTimeout,
-		channels:     map[int]*DataChannel{},
 		done:         make(chan struct{}),
 	}
 	n.maxStreams.Store(int64(cfg.MaxStreamsPerConn))
 	n.lastSeen.Store(time.Now().UnixNano())
 	return n
 }
+
+func (n *NodeSession) AttachMux(m *mux.Conn) { n.mux = m }
 
 func (n *NodeSession) Done() <-chan struct{} { return n.done }
 
@@ -291,40 +264,27 @@ func (n *NodeSession) Heartbeat() time.Duration {
 	return n.cfg.Heartbeat.D()
 }
 
-// SendControl writes one JSON message on the control channel.
+// SendControl writes one JSON message on the WebSocket.
 func (n *NodeSession) SendControl(msg *protocol.Message) error {
-	n.ctrlMu.Lock()
-	defer n.ctrlMu.Unlock()
+	if n.mux == nil {
+		return errors.New("no mux session")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return wsutil.WriteJSON(ctx, n.ctrl, msg)
+	return n.mux.SendControl(ctx, msg)
 }
 
-// NextChannelID hands out the channel_id echoed back in the data-channel
-// welcome; ids are unique within a session, not across reconnects.
-func (n *NodeSession) NextChannelID() int { return int(n.chanSeq.Add(1)) }
+func (n *NodeSession) Mux() *mux.Conn { return n.mux }
 
-func (n *NodeSession) AddChannel(ch *DataChannel) {
-	n.chMu.Lock()
-	n.channels[ch.ID] = ch
-	// Fresh capacity: give it to whoever has been waiting longest.
-	n.handoffLocked()
-	n.chMu.Unlock()
-}
-
-func (n *NodeSession) RemoveChannel(ch *DataChannel) {
-	n.chMu.Lock()
-	if cur, ok := n.channels[ch.ID]; ok && cur == ch {
-		delete(n.channels, ch.ID)
-	}
-	n.chMu.Unlock()
-	ch.Close()
+func (n *NodeSession) Online() bool {
+	return n.mux != nil && !n.mux.Closed()
 }
 
 func (n *NodeSession) OnlineChannels() int {
-	n.chMu.Lock()
-	defer n.chMu.Unlock()
-	return len(n.channels)
+	if n.Online() {
+		return 1
+	}
+	return 0
 }
 
 func (n *NodeSession) ActiveStreams() int64 { return n.activeStreams.Load() }
@@ -348,20 +308,20 @@ func (n *NodeSession) ClientStats() *protocol.Stats     { return n.clientStats.L
 func (n *NodeSession) SetDraining(v bool) { n.draining.Store(v) }
 func (n *NodeSession) Draining() bool     { return n.draining.Load() }
 
-// OpenStream reserves a slot on the least-loaded channel and opens a smux
-// stream, queueing up to queue_timeout when every channel is full (§8). The
-// queue is FIFO: while anyone is parked, an arriving request joins the tail
-// rather than racing them for the next freed slot, which bounds the wait
-// instead of leaving a long tail under sustained saturation.
-func (n *NodeSession) OpenStream(ctx context.Context) (*smux.Stream, *DataChannel, error) {
+// OpenStream reserves a slot up to max_streams_per_conn and opens a mux
+// stream, queueing up to queue_timeout when the session is full. The queue is
+// FIFO: while anyone is parked, an arriving request joins the tail rather than
+// racing them for the next freed slot.
+func (n *NodeSession) OpenStream(ctx context.Context, port int) (*mux.Stream, error) {
 	if n.draining.Load() {
-		return nil, nil, ErrDraining
+		return nil, ErrDraining
+	}
+	if n.mux == nil || n.mux.Closed() {
+		return nil, ErrNoChannel
 	}
 	timer := time.NewTimer(n.QueueTimeout())
 	defer timer.Stop()
 
-	// A request counts towards demand from the moment it arrives: queued
-	// while it waits, active once it holds a slot — never both at once.
 	n.queueDepth.Add(1)
 	queued := true
 	defer func() {
@@ -372,70 +332,61 @@ func (n *NodeSession) OpenStream(ctx context.Context) (*smux.Stream, *DataChanne
 	n.observeDemand()
 
 	for {
-		ch, waiter := n.acquire()
-		if ch == nil {
-			// Parked at the tail. Whoever frees a slot hands it to us.
+		ok, waiter := n.acquire()
+		if !ok {
 			select {
-			case ch = <-waiter.ready:
+			case <-waiter.ready:
 			case <-timer.C:
-				if ch = n.abandon(waiter); ch == nil {
-					if n.OnlineChannels() == 0 {
-						return nil, nil, ErrNoChannel
-					}
+				if !n.abandon(waiter) {
 					n.stats.Saturated.Add(1)
-					return nil, nil, ErrSaturated
+					return nil, ErrSaturated
 				}
 			case <-n.done:
-				if ch = n.abandon(waiter); ch == nil {
-					return nil, nil, ErrSessionClosed
+				if !n.abandon(waiter) {
+					return nil, ErrSessionClosed
 				}
 			case <-ctx.Done():
-				if ch = n.abandon(waiter); ch == nil {
-					return nil, nil, ctx.Err()
+				if !n.abandon(waiter) {
+					return nil, ctx.Err()
 				}
 			}
 		}
 
-		st, err := ch.sess.OpenStream()
+		st, err := n.mux.Open(ctx, port)
 		if err != nil {
-			n.release(ch)
-			n.log.Warn("data channel unusable, dropping it",
-				"node", n.Name, "channel", ch.ID, "err", err)
-			n.RemoveChannel(ch)
-			continue
+			n.release()
+			if n.mux == nil || n.mux.Closed() {
+				return nil, ErrSessionClosed
+			}
+			return nil, err
 		}
 		n.queueDepth.Add(-1)
 		queued = false
 		n.stats.Opened.Add(1)
 		n.observeDemand()
-		return st, ch, nil
+		return st, nil
 	}
 }
 
-// acquire returns a reserved channel, or parks the caller and returns the
-// waiter it was queued as. Reserving and parking happen under one lock hold so
-// a slot freed in between cannot be missed.
-func (n *NodeSession) acquire() (*DataChannel, *slotWaiter) {
+func (n *NodeSession) acquire() (bool, *slotWaiter) {
 	n.chMu.Lock()
 	defer n.chMu.Unlock()
 	if len(n.waiters) == 0 {
-		if ch := n.reserveLocked(); ch != nil {
-			return ch, nil
+		if n.reserveLocked() {
+			return true, nil
 		}
 	}
-	w := &slotWaiter{ready: make(chan *DataChannel, 1)}
+	w := &slotWaiter{ready: make(chan struct{}, 1)}
 	n.waiters = append(n.waiters, w)
-	return nil, w
+	return false, w
 }
 
-// abandon takes a waiter out of the queue. It returns non-nil when a slot was
-// already handed over — the handoff won the race against the caller's timeout,
-// and dropping it on the floor would lose the slot for good.
-func (n *NodeSession) abandon(w *slotWaiter) *DataChannel {
+func (n *NodeSession) abandon(w *slotWaiter) bool {
 	n.chMu.Lock()
 	if w.handed {
 		n.chMu.Unlock()
-		return <-w.ready
+		<-w.ready
+		return true
 	}
 	for i, cur := range n.waiters {
 		if cur == w {
@@ -444,65 +395,41 @@ func (n *NodeSession) abandon(w *slotWaiter) *DataChannel {
 		}
 	}
 	n.chMu.Unlock()
-	return nil
+	return false
 }
 
-// CloseStream releases the reserved slot.
-func (n *NodeSession) CloseStream(ch *DataChannel, st *smux.Stream) {
+func (n *NodeSession) CloseStream(st *mux.Stream) {
 	if st != nil {
 		_ = st.Close()
 	}
-	n.release(ch)
+	n.release()
 }
 
-// reserveLocked picks the least-loaded usable channel and books a slot on it.
-// Caller holds chMu.
-func (n *NodeSession) reserveLocked() *DataChannel {
-	max := int64(n.maxStreams.Load())
-	var best *DataChannel
-	var bestActive int64
-	for _, ch := range n.channels {
-		if ch.closed.Load() || ch.sess.IsClosed() {
-			continue
-		}
-		a := ch.active.Load()
-		if a >= max {
-			continue
-		}
-		if best == nil || a < bestActive {
-			best, bestActive = ch, a
-		}
+func (n *NodeSession) reserveLocked() bool {
+	max := n.maxStreams.Load()
+	if n.activeStreams.Load() >= max {
+		return false
 	}
-	if best != nil {
-		best.active.Add(1)
-		n.activeStreams.Add(1)
-	}
-	return best
+	n.activeStreams.Add(1)
+	return true
 }
 
-func (n *NodeSession) release(ch *DataChannel) {
-	if ch == nil {
-		return
-	}
+func (n *NodeSession) release() {
 	n.chMu.Lock()
-	ch.active.Add(-1)
 	n.activeStreams.Add(-1)
 	n.handoffLocked()
 	n.chMu.Unlock()
 }
 
-// handoffLocked passes freed capacity to the head of the queue, in order, for
-// as long as both a waiter and a free slot exist. Caller holds chMu.
 func (n *NodeSession) handoffLocked() {
 	for len(n.waiters) > 0 {
-		ch := n.reserveLocked()
-		if ch == nil {
+		if !n.reserveLocked() {
 			return
 		}
 		w := n.waiters[0]
 		n.waiters = n.waiters[1:]
 		w.handed = true
-		w.ready <- ch // buffered, and each waiter is served once
+		w.ready <- struct{}{}
 	}
 }
 
@@ -510,8 +437,7 @@ func (n *NodeSession) observeDemand() {
 	n.stats.ObserveDemand(n.activeStreams.Load() + n.queueDepth.Load())
 }
 
-// Close tears the session down: control channel, every data channel, and
-// every stream riding on them.
+// Close tears the session down and RST every in-flight stream.
 func (n *NodeSession) Close(reason string) {
 	n.closeOnce.Do(func() {
 		n.reasonMu.Lock()
@@ -519,19 +445,9 @@ func (n *NodeSession) Close(reason string) {
 		n.reasonMu.Unlock()
 
 		close(n.done)
-
-		n.chMu.Lock()
-		chans := make([]*DataChannel, 0, len(n.channels))
-		for _, ch := range n.channels {
-			chans = append(chans, ch)
+		if n.mux != nil {
+			n.mux.Close()
 		}
-		n.channels = map[int]*DataChannel{}
-		n.chMu.Unlock()
-		for _, ch := range chans {
-			ch.Close()
-		}
-
-		wsutil.Close(n.ctrl, websocket.StatusNormalClosure, truncate(reason, 100))
 	})
 }
 
