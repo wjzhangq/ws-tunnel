@@ -241,7 +241,7 @@ ports:
 	})
 
 	t.Run("many concurrent connections", func(t *testing.T) {
-		const n = 24 // > channels, so streams share the smux sessions
+		const n = 24 // more than max_streams_per_conn, so streams queue
 		errs := make(chan error, n)
 		for i := 0; i < n; i++ {
 			go func(i int) {

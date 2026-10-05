@@ -1,5 +1,7 @@
 # WS 反向隧道 — 独立 Server / Client 设计文档
 
+> **实现现状(2026-10):** 每个 node **一条 WebSocket** 同时承载 JSON 控制与多路 L4 流(`internal/mux`);同 key 重连**抢占**旧会话。下文仍描述最初的 smux + 固定多数据通道 + `node_busy` 方案,作历史对照。
+
 > 语言:Go 1.25+ · 形态:**独立二进制**(`tunnel-server` + `tunnel-client`)
 >
 > 多路复用:WS 上跑 **smux** · 数据通道 **固定 `channels` 条** · client 仅需 `url + key` · server 配置一份 **YAML**,支持 **热重载**

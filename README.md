@@ -3,13 +3,14 @@
 WS 反向隧道的两个独立二进制实现:`tunnel-server` + `tunnel-client`。
 
 - 传输:纯明文 `ws://`,server 不做任何 TLS 处理
-- 多路复用:WS 上跑 [smux](https://github.com/xtaci/smux),每个 node 固定 `channels` 条数据通道 + 1 条控制通道
+- 多路复用:**每个 node 一条 WebSocket**;文本帧走 JSON 控制,二进制帧承载多路 TCP 流(半关闭用 FIN)
+- 重连:同 key 的新连接**抢占**旧会话,反向监听端口保持,崩溃重启不再空等 `heartbeat×3`
 - 转发对象:原始 TCP 字节流(L4 透传),HTTP / gRPC / MySQL 等应用层协议对隧道透明
 - 寻址:**server 反向监听端口号本身就是端口 id**
 - Client 只需要 `url + key`,端口清单等由 server 握手时下发,运行期可热更
 - Server 一份 YAML,支持增量热重载(fsnotify + `SIGHUP`)
 
-对应设计文档:`ws-tunnel-server-client-design.md` §1–§16。实现与文档的逐条对照见 **HANDOFF.md**。
+对应设计文档:`ws-tunnel-server-client-design.md`(历史方案含 smux 多通道;实现已改为单 WS + 抢占)。
 
 ---
 

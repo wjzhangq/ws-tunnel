@@ -11,8 +11,8 @@ listen: ":8443"
 status_listen: "127.0.0.1:8090"
 
 settings:
-  # 控制通道 ping/pong 间隔;连续 heartbeat×3 无响应判定控制通道死亡。
-  # 数据通道保活由 smux keepalive 负责。
+  # 控制通道 ping/pong 间隔;连续 heartbeat×3 无响应判定连接死亡。
+  # 数据帧也会刷新 last-seen。
   heartbeat: 15s
   # 开流超时:写完流头后等 client 回 1 字节 ack 的时限。
   dial_timeout: 10s
@@ -26,7 +26,7 @@ settings:
 nodes:
   node1:
     key: "xx1"      # 全局唯一;重复时保留文档中先出现的那条,后者丢弃并打 WARN
-    channels: 4     # 固定数据通道数,运行期不增减(默认 4)
+    channels: 4     # 保留字段;实现固定 1 条 WebSocket,并发上限看 max_streams_per_conn
   node2:
     key: "xx2"
     channels: 2

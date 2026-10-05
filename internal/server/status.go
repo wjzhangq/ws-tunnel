@@ -123,6 +123,9 @@ func (s *Server) buildStatus(filter string) statusDoc {
 		needed := 0
 		if maxStreams > 0 {
 			needed = int(math.Ceil(float64(peak) / float64(maxStreams)))
+			if needed < 1 && sess.Online() {
+				needed = 1
+			}
 		}
 		ns.Up = true
 		ns.Control = &controlStatus{
@@ -130,7 +133,7 @@ func (s *Server) buildStatus(filter string) statusDoc {
 			LastSeen:  sess.LastSeen().UTC(),
 			RTTms:     sess.RTT().Milliseconds(),
 		}
-		ns.Channels = &channelStatus{Configured: nodeCfg.Channels, Online: sess.OnlineChannels()}
+		ns.Channels = &channelStatus{Configured: 1, Online: sess.OnlineChannels()}
 		ns.Streams = &streamStatus{
 			Active:      sess.ActiveStreams(),
 			OpenedTotal: stats.Opened.Load(),
@@ -138,7 +141,7 @@ func (s *Server) buildStatus(filter string) statusDoc {
 		}
 		ns.Capacity = &capacityStatus{
 			MaxStreamsPerConn:    maxStreams,
-			MaxConcurrent:        nodeCfg.Channels * maxStreams,
+			MaxConcurrent:        maxStreams,
 			PeakDemand:           peak,
 			ChannelsNeededAtPeak: needed,
 			SaturatedTotal:       stats.Saturated.Load(),
@@ -204,7 +207,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	m := newMetricSet()
 
 	m.declare("tunnel_node_up", "gauge", "1 when the node has a live control channel")
-	m.declare("tunnel_channels", "gauge", "Configured vs online data channels")
+	m.declare("tunnel_channels", "gauge", "1 when the node has its single WebSocket up")
 	m.declare("tunnel_streams_active", "gauge", "Streams currently forwarding")
 	m.declare("tunnel_streams_peak", "gauge", "Peak concurrent stream demand since start")
 	m.declare("tunnel_channels_needed_peak", "gauge", "ceil(peak_demand / max_streams_per_conn)")
@@ -223,13 +226,12 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		l := map[string]string{"node": name}
 
 		up := 0.0
-		configured, online, maxStreams := cfg.Nodes[name].Channels, 0, cfg.Settings.MaxStreamsPerConn
+		configured, online, maxStreams := 1, 0, cfg.Settings.MaxStreamsPerConn
 		var active int64
 		if sess != nil {
 			up = 1
 			online = sess.OnlineChannels()
 			active = sess.ActiveStreams()
-			configured = sess.Config().Channels
 			maxStreams = sess.Config().MaxStreamsPerConn
 		}
 		m.gauge("tunnel_node_up", l, up)

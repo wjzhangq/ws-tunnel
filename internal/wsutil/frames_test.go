@@ -73,8 +73,7 @@ func TestWriteReadJSONRoundTrip(t *testing.T) {
 	}
 }
 
-// TestReadJSONRejectsBinaryFrames covers the control/data split: the control
-// channel carries JSON text frames only, and binary belongs to smux.
+// TestReadJSONRejectsBinaryFrames: handshake JSON must not accept a binary frame.
 func TestReadJSONRejectsBinaryFrames(t *testing.T) {
 	cc, sc := wsPair(t)
 	ctx := context.Background()

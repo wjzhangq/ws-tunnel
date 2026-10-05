@@ -392,4 +392,3 @@ func (c *Client) handleStream(ctx context.Context, st *mux.Stream) {
 	_ = st.CloseWrite()
 	wg.Wait()
 }
-
