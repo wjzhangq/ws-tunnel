@@ -3,8 +3,6 @@ package client
 import (
 	"context"
 	"strconv"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -60,73 +58,6 @@ func TestLastErrorRoundTrips(t *testing.T) {
 	if got := c.lastError(); got != "second" {
 		t.Errorf("lastError = %q, want the most recent failure", got)
 	}
-}
-
-// TestSupervisorResizesInPlace covers the supervisor contract the server relies
-// on when it pushes a new channel count: grow and shrink without restarting the
-// channels that are already up.
-func TestSupervisorResizesInPlace(t *testing.T) {
-	c := testClient()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var (
-		mu      sync.Mutex
-		started []int
-		live    atomic.Int64
-	)
-	// Stand in for runChannel: block until the slot's context is cancelled,
-	// which is exactly the lifetime a real data channel has.
-	sup := newSupervisor(c, ctx)
-	sup.run = func(wctx context.Context, slot int) {
-		mu.Lock()
-		started = append(started, slot)
-		mu.Unlock()
-		live.Add(1)
-		defer live.Add(-1)
-		<-wctx.Done()
-	}
-
-	sup.SetTarget(4)
-	waitCount(t, &live, 4)
-
-	// Growing must only add: the four already-running slots keep running.
-	sup.SetTarget(6)
-	waitCount(t, &live, 6)
-	mu.Lock()
-	total := len(started)
-	mu.Unlock()
-	if total != 6 {
-		t.Fatalf("started %d channels to reach 6, want 6 — existing slots were restarted", total)
-	}
-
-	sup.SetTarget(2)
-	waitCount(t, &live, 2)
-	mu.Lock()
-	total = len(started)
-	mu.Unlock()
-	if total != 6 {
-		t.Fatalf("started %d channels total after shrinking, want still 6", total)
-	}
-
-	// The pool never goes below one channel, whatever the server pushes.
-	sup.SetTarget(0)
-	waitCount(t, &live, 1)
-
-	sup.Stop()
-	waitCount(t, &live, 0)
-}
-
-func waitCount(t *testing.T, n *atomic.Int64, want int64) {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if n.Load() == want {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("live channels = %d, want %d", n.Load(), want)
 }
 
 // TestStatsHeartbeatFallback documents the timer choice when the server pushed

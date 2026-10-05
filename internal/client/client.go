@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/xtaci/smux"
 
+	"ws-tunnel/internal/mux"
 	"ws-tunnel/internal/protocol"
 	"ws-tunnel/internal/wsutil"
 )
@@ -43,8 +43,8 @@ type Client struct {
 	cfg     *protocol.NodeConfig
 	session string
 
-	ctrlMu sync.Mutex
-	ctrl   *websocket.Conn
+	muxMu sync.Mutex
+	mux   *mux.Conn
 
 	draining atomic.Bool
 
@@ -140,64 +140,78 @@ func (c *Client) runSession(ctx context.Context) error {
 
 	cfg := c.Config()
 	c.draining.Store(false)
-	c.setCtrl(conn)
-	defer c.setCtrl(nil)
 
-	c.Log.Info("control channel up",
-		"node", c.Node, "session", c.Session(), "channels", cfg.Channels,
+	sess := mux.New(ctx, mux.WS{C: conn})
+	c.setMux(sess)
+	defer func() {
+		c.setMux(nil)
+		sess.Close()
+	}()
+
+	c.channelsOnline.Store(1)
+	defer c.channelsOnline.Store(0)
+
+	c.Log.Info("session up",
+		"node", c.Node, "session", c.Session(),
 		"ports", len(cfg.Ports), "heartbeat", cfg.Heartbeat.D())
 
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	sup := newSupervisor(c, sctx)
-	sup.SetTarget(cfg.Channels)
-	defer sup.Stop()
-
 	go c.statsLoop(sctx)
+	go c.acceptLoop(sctx, sess)
 
-	return c.controlLoop(sctx, conn, sup)
+	return c.controlLoop(sctx, sess)
 }
 
-func (c *Client) controlLoop(ctx context.Context, conn *websocket.Conn, sup *supervisor) error {
+func (c *Client) controlLoop(ctx context.Context, sess *mux.Conn) error {
 	for {
 		hb := c.Config().Heartbeat.D()
 		if hb <= 0 {
 			hb = defaultRetryHB
 		}
-		rctx, cancel := context.WithTimeout(ctx, 3*hb)
-		msg, err := wsutil.ReadJSON(rctx, conn)
-		cancel()
-		if err != nil {
+		timer := time.NewTimer(3 * hb)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-sess.Done():
+			timer.Stop()
 			if ctx.Err() != nil {
 				return nil
 			}
-			return err
-		}
-
-		switch msg.Type {
-		case protocol.TypePing:
-			_ = c.sendControl(&protocol.Message{Type: protocol.TypePong, Nonce: msg.Nonce, TS: msg.TS})
-		case protocol.TypePong:
-			// nothing to do; the read itself proves liveness
-		case protocol.TypeReloadConfig:
-			if msg.Config == nil {
-				continue
+			return errors.New("websocket closed")
+		case <-timer.C:
+			if time.Since(sess.LastRead()) > 3*hb {
+				return errors.New("server heartbeat timeout")
 			}
-			c.setConfig(msg.Config)
-			sup.SetTarget(msg.Config.Channels)
-			c.Log.Info("config reloaded in place",
-				"ports", len(msg.Config.Ports), "channels", msg.Config.Channels)
-		case protocol.TypeDrain:
-			c.draining.Store(true)
-			c.Log.Info("draining on server request", "deadline", msg.Deadline)
-		case protocol.TypeBye:
-			c.Log.Info("server said bye", "reason", msg.Reason)
-			return nil
-		case protocol.TypeError:
-			c.Log.Warn("server error", "code", msg.Code, "msg", msg.Msg)
-			if msg.Code == protocol.ErrNodeBusy || msg.Code == protocol.ErrAuthFailed {
-				return errors.New(msg.Code + ": " + msg.Msg)
+		case msg := <-sess.Controls():
+			timer.Stop()
+			if msg == nil {
+				return errors.New("control channel closed")
+			}
+			switch msg.Type {
+			case protocol.TypePing:
+				_ = c.sendControl(&protocol.Message{Type: protocol.TypePong, Nonce: msg.Nonce, TS: msg.TS})
+			case protocol.TypePong:
+			case protocol.TypeReloadConfig:
+				if msg.Config == nil {
+					continue
+				}
+				c.setConfig(msg.Config)
+				c.Log.Info("config reloaded in place",
+					"ports", len(msg.Config.Ports))
+			case protocol.TypeDrain:
+				c.draining.Store(true)
+				c.Log.Info("draining on server request", "deadline", msg.Deadline)
+			case protocol.TypeBye:
+				c.Log.Info("server said bye", "reason", msg.Reason)
+				return nil
+			case protocol.TypeError:
+				c.Log.Warn("server error", "code", msg.Code, "msg", msg.Msg)
+				if msg.Code == protocol.ErrAuthFailed {
+					return errors.New(msg.Code + ": " + msg.Msg)
+				}
 			}
 		}
 	}
@@ -282,21 +296,22 @@ func (c *Client) lastError() string {
 	return ""
 }
 
-func (c *Client) setCtrl(conn *websocket.Conn) {
-	c.ctrlMu.Lock()
-	c.ctrl = conn
-	c.ctrlMu.Unlock()
+func (c *Client) setMux(m *mux.Conn) {
+	c.muxMu.Lock()
+	c.mux = m
+	c.muxMu.Unlock()
 }
 
 func (c *Client) sendControl(msg *protocol.Message) error {
-	c.ctrlMu.Lock()
-	defer c.ctrlMu.Unlock()
-	if c.ctrl == nil {
-		return errors.New("no control channel")
+	c.muxMu.Lock()
+	sess := c.mux
+	c.muxMu.Unlock()
+	if sess == nil {
+		return errors.New("no session")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return wsutil.WriteJSON(ctx, c.ctrl, msg)
+	return sess.SendControl(ctx, msg)
 }
 
 // remoteFor resolves a port id against the pushed allow-list (§10).
@@ -308,193 +323,37 @@ func (c *Client) remoteFor(port int) string {
 	return cfg.Ports[strconv.Itoa(port)]
 }
 
-// ─── data channel pool ───────────────────────────────────────────────────
-
-// supervisor keeps exactly `channels` data channels up, rebuilding any that
-// drop and resizing in place when the server pushes a new channel count.
-type supervisor struct {
-	c   *Client
-	ctx context.Context
-
-	// run is what a slot executes; it is a field so tests can drive the
-	// resize logic without standing up real WS data channels.
-	run func(ctx context.Context, slot int)
-
-	mu      sync.Mutex
-	workers map[int]context.CancelFunc
-	nextID  int
-	target  int
-	wg      sync.WaitGroup
-}
-
-func newSupervisor(c *Client, ctx context.Context) *supervisor {
-	s := &supervisor{c: c, ctx: ctx, workers: map[int]context.CancelFunc{}}
-	s.run = c.runChannel
-	return s
-}
-
-func (s *supervisor) SetTarget(n int) {
-	if n < 1 {
-		n = 1
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.target = n
-	for len(s.workers) < n {
-		s.nextID++
-		id := s.nextID
-		wctx, cancel := context.WithCancel(s.ctx)
-		s.workers[id] = cancel
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			defer func() {
-				s.mu.Lock()
-				delete(s.workers, id)
-				s.mu.Unlock()
-			}()
-			s.run(wctx, id)
-		}()
-	}
-	for len(s.workers) > n {
-		for id, cancel := range s.workers {
-			cancel()
-			delete(s.workers, id)
-			break
-		}
-	}
-}
-
-func (s *supervisor) Stop() {
-	s.mu.Lock()
-	for id, cancel := range s.workers {
-		cancel()
-		delete(s.workers, id)
-	}
-	s.mu.Unlock()
-	s.wg.Wait()
-}
-
-// runChannel keeps one data channel connected for as long as its slot exists.
-func (c *Client) runChannel(ctx context.Context, slot int) {
-	backoff := minBackoff
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		started := time.Now()
-		err := c.serveChannel(ctx, slot)
-		if ctx.Err() != nil {
-			return
-		}
-		if err != nil {
-			c.Log.Warn("data channel dropped", "slot", slot, "err", err)
-		}
-		if time.Since(started) > stableSession {
-			backoff = minBackoff
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
-		}
-		if backoff < maxBackoff {
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-		}
-	}
-}
-
-func (c *Client) serveChannel(ctx context.Context, slot int) error {
-	dctx, dcancel := context.WithTimeout(ctx, dialTimeout)
-	conn, _, err := websocket.Dial(dctx, c.URL, &websocket.DialOptions{
-		CompressionMode: websocket.CompressionDisabled,
-	})
-	dcancel()
-	if err != nil {
-		return err
-	}
-	wsutil.Prepare(conn)
-	defer conn.CloseNow()
-
-	hctx, hcancel := context.WithTimeout(ctx, dialTimeout)
-	err = wsutil.WriteJSON(hctx, conn, &protocol.Message{
-		Type: protocol.TypeHello, Role: protocol.RoleData,
-		Node: c.Node, Key: c.Key, Session: c.Session(),
-	})
-	var welcome *protocol.Message
-	if err == nil {
-		welcome, err = wsutil.ReadJSON(hctx, conn)
-	}
-	hcancel()
-	if err != nil {
-		return err
-	}
-	if welcome.Type == protocol.TypeError {
-		return errors.New("data channel refused: " + welcome.Code + " " + welcome.Msg)
-	}
-	if welcome.Type != protocol.TypeWelcome {
-		return errors.New("unexpected reply to data hello: " + welcome.Type)
-	}
-
-	cctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	nc := wsutil.NetConn(cctx, conn)
-	// Mirror of the server: it opens streams (smux client), we accept them.
-	sess, err := smux.Server(nc, wsutil.SmuxConfig(c.Config().Heartbeat.D()))
-	if err != nil {
-		return err
-	}
-	defer sess.Close()
-
-	c.channelsOnline.Add(1)
-	defer c.channelsOnline.Add(-1)
-	c.Log.Info("data channel up", "slot", slot, "channel_id", welcome.ChannelID)
-
+func (c *Client) acceptLoop(ctx context.Context, sess *mux.Conn) {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	for {
-		st, err := sess.AcceptStream()
+		st, err := sess.Accept(ctx)
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return err
+			return
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c.handleStream(cctx, st)
+			c.handleStream(ctx, st)
 		}()
 	}
 }
 
-// handleStream reads the stream header, dials the local service and answers
-// with the single ack byte before piping bytes (§7.1).
-func (c *Client) handleStream(ctx context.Context, st *smux.Stream) {
+func (c *Client) handleStream(ctx context.Context, st *mux.Stream) {
 	defer st.Close()
 	c.activeStreams.Add(1)
 	defer c.activeStreams.Add(-1)
 
-	port, err := protocol.ReadStreamHeader(st)
-	if err != nil {
-		c.Log.Warn("bad stream header", "err", err)
-		if !errors.Is(err, io.EOF) {
-			_ = protocol.WriteAck(st, protocol.AckRejected)
-		}
-		return
-	}
+	port := st.Port()
 	if c.draining.Load() {
-		_ = protocol.WriteAck(st, protocol.AckRejected)
+		_ = st.Ack(protocol.AckRejected)
 		return
 	}
 
 	remote := c.remoteFor(port)
 	if remote == "" {
 		c.Log.Warn("port id not in the allow-list", "port", port)
-		_ = protocol.WriteAck(st, protocol.AckPortNotAllowed)
+		_ = st.Ack(protocol.AckPortNotAllowed)
 		return
 	}
 
@@ -507,34 +366,30 @@ func (c *Client) handleStream(ctx context.Context, st *smux.Stream) {
 	if err != nil {
 		c.localDialErrors.Add(1)
 		c.Log.Warn("dialing the local service failed", "port", port, "remote", remote, "err", err)
-		_ = protocol.WriteAck(st, protocol.AckDialFailed)
+		_ = st.Ack(protocol.AckDialFailed)
 		return
 	}
 	defer local.Close()
 
-	if err := protocol.WriteAck(st, protocol.AckOK); err != nil {
+	if err := st.Ack(protocol.AckOK); err != nil {
 		return
 	}
 
-	fw := protocol.NewFrameWriter(st)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		n, _ := io.Copy(local, protocol.NewFrameReader(st))
+		n, _ := io.Copy(local, st)
 		c.bytesIn.Add(n)
-		// The external client half-closed; pass the FIN on so the local service
-		// sees EOF and can answer on the still-open write side.
 		if tc, ok := local.(*net.TCPConn); ok {
 			_ = tc.CloseWrite()
 		} else {
 			_ = local.Close()
 		}
 	}()
-	n, _ := io.Copy(fw, local)
+	n, _ := io.Copy(st, local)
 	c.bytesOut.Add(n)
-	// End-of-direction goes in-band; st.Close is left to the deferred teardown
-	// so the upstream copy above keeps its read side.
-	_ = fw.CloseWrite()
+	_ = st.CloseWrite()
 	wg.Wait()
 }
+

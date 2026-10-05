@@ -76,9 +76,9 @@ func (c *Client) Status() ClientStatus {
 		Ports: []portView{},
 	}
 
-	c.ctrlMu.Lock()
-	st.Connected = c.ctrl != nil
-	c.ctrlMu.Unlock()
+	c.muxMu.Lock()
+	st.Connected = c.mux != nil
+	c.muxMu.Unlock()
 
 	if msg := c.lastError(); msg != "" {
 		st.LastError = &msg

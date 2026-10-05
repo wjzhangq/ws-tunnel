@@ -223,10 +223,10 @@ ports:
 		<-cliDone
 	})
 
-	waitFor(t, "node1 to come online with both channels", 10*time.Second, func() bool {
+	waitFor(t, "node1 to come online", 10*time.Second, func() bool {
 		doc := fetchStatus(t, statusAddr)
 		return len(doc.Nodes) == 1 && doc.Nodes[0].Up &&
-			doc.Nodes[0].Channels.Online == 2 &&
+			doc.Nodes[0].Channels.Online == 1 &&
 			len(doc.Nodes[0].Ports) == 1 && doc.Nodes[0].Ports[0].Listening
 	})
 
