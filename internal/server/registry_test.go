@@ -78,3 +78,22 @@ func TestOpenStreamRespectsMaxStreamsPerConn(t *testing.T) {
 		t.Fatalf("queue depth = %d after the waiter gave up, want 0", got)
 	}
 }
+
+func TestTakeoverReplacesLiveSession(t *testing.T) {
+	r := newRegistry(testLogger())
+	a := newNodeSession("node1", &protocol.NodeConfig{MaxStreamsPerConn: 1}, time.Second, r.Stats("node1"), testLogger())
+	b := newNodeSession("node1", &protocol.NodeConfig{MaxStreamsPerConn: 1}, time.Second, r.Stats("node1"), testLogger())
+	if err := r.Register(a); err != nil {
+		t.Fatal(err)
+	}
+	old := r.Takeover(b)
+	if old != a {
+		t.Fatalf("Takeover returned %v, want the incumbent", old)
+	}
+	if r.Get("node1") != b {
+		t.Fatal("live session was not replaced")
+	}
+	if err := r.Register(newNodeSession("node1", &protocol.NodeConfig{MaxStreamsPerConn: 1}, time.Second, r.Stats("node1"), testLogger())); err != ErrNodeBusy {
+		t.Fatalf("Register after Takeover: %v, want ErrNodeBusy", err)
+	}
+}

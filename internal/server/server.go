@@ -305,11 +305,14 @@ func (s *Server) serveSession(ctx context.Context, c *websocket.Conn, spec *conf
 	sess := newNodeSession(spec.Name, nodeCfg, cfg.Settings.QueueTimeout, stats, s.log)
 	sess.AttachMux(mux.New(s.baseCtx, mux.WS{C: c}))
 
-	if err := s.registry.Register(sess); err != nil {
-		s.log.Warn("refusing duplicate session", "node", spec.Name, "remote", remote)
-		_ = sess.SendControl(protocol.Errorf(protocol.ErrNodeBusy, "node %s already has a session", spec.Name))
-		sess.Close("duplicate")
-		return
+	old := s.registry.Takeover(sess)
+	if old != nil {
+		s.log.Info("taking over node session",
+			"node", spec.Name, "old_session", old.ID, "new_session", sess.ID, "remote", remote)
+		_ = old.SendControl(&protocol.Message{
+			Type: protocol.TypeBye, Reason: "replaced by a new session",
+		})
+		old.Close("replaced by a new session")
 	}
 
 	if err := sess.SendControl(&protocol.Message{
@@ -341,8 +344,10 @@ func (s *Server) serveSession(ctx context.Context, c *websocket.Conn, spec *conf
 	go s.pingLoop(ctrlCtx, sess)
 	reason := s.controlReadLoop(ctrlCtx, sess)
 
-	s.listeners.StopNode(spec.Name, false)
-	s.registry.Unregister(sess, reason)
+	if s.registry.Get(spec.Name) == sess {
+		s.listeners.StopNode(spec.Name, false)
+		s.registry.Unregister(sess, reason)
+	}
 	sess.Close(reason)
 	s.log.Info("node offline", "node", spec.Name, "session", sess.ID, "reason", reason)
 }

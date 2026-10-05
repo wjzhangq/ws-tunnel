@@ -16,8 +16,6 @@ import (
 )
 
 var (
-	// ErrNodeBusy is returned when a node already has a live control channel;
-	// the newcomer is refused (§4).
 	ErrNodeBusy = errors.New("node already has a control channel")
 	// ErrSaturated means every data channel was at max_streams_per_conn for
 	// longer than queue_timeout (§8).
@@ -488,6 +486,22 @@ func (r *Registry) Register(sess *NodeSession) error {
 	if _, ok := r.live[sess.Name]; ok {
 		return ErrNodeBusy
 	}
+	r.installLocked(sess)
+	return nil
+}
+
+// Takeover installs sess as the live session, returning the previous one if
+// any. Listeners stay up; the caller is responsible for closing the old
+// session so its in-flight streams die without dropping the reverse ports.
+func (r *Registry) Takeover(sess *NodeSession) *NodeSession {
+	r.mu.Lock()
+	old := r.live[sess.Name]
+	r.installLocked(sess)
+	r.mu.Unlock()
+	return old
+}
+
+func (r *Registry) installLocked(sess *NodeSession) {
 	r.live[sess.Name] = sess
 	s := r.stats[sess.Name]
 	if s == nil {
@@ -498,7 +512,6 @@ func (r *Registry) Register(sess *NodeSession) error {
 	s.connectedAt = sess.ConnectedAt
 	s.disconnectedAt = time.Time{}
 	s.mu.Unlock()
-	return nil
 }
 
 // Unregister removes the session if it is still the current one.

@@ -346,22 +346,26 @@ ports:
 		})
 	})
 
-	t.Run("a second client for the same node is refused", func(t *testing.T) {
+	t.Run("a second client for the same node takes over", func(t *testing.T) {
 		intruder := &client.Client{
 			URL: fmt.Sprintf("ws://127.0.0.1:%d/ws", wsPort),
 			Key: "secret-1",
 			Log: log.With("side", "intruder"),
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		done := make(chan struct{})
-		go func() { defer close(done); _ = intruder.Run(ctx) }()
-		<-ctx.Done()
-		<-done
+		ictx, icancel := context.WithCancel(context.Background())
+		idone := make(chan struct{})
+		go func() { defer close(idone); _ = intruder.Run(ictx) }()
+		t.Cleanup(func() { icancel(); <-idone })
 
-		// The incumbent is untouched.
+		waitFor(t, "the replacement session", 10*time.Second, func() bool {
+			return intruder.Session() != ""
+		})
+		// Drop the incumbent so it cannot steal the session back on reconnect.
+		stopCli()
+		<-cliDone
+
 		if got, err := roundTrip(t, revPortA, "alive"); err != nil || got != "A:alive" {
-			t.Fatalf("the incumbent session was disturbed: %q %v", got, err)
+			t.Fatalf("takeover dropped the tunnel: %q %v", got, err)
 		}
 	})
 
