@@ -26,9 +26,13 @@ type Stream struct {
 	readEOF  bool
 	readErr  error
 	// recvUsed is bytes received but not yet credited back with WINDOW;
-	// the peer may never push it past recvLimit.
-	recvUsed  int
-	recvLimit int
+	// the peer may never push it past recvLimit. recvPending is the part of
+	// recvUsed already consumed by Read, returned once it reaches half of
+	// recvWindow so WINDOW frames are batched rather than one per Read.
+	recvUsed    int
+	recvPending int
+	recvWindow  int
+	recvLimit   int
 
 	sendMu     sync.Mutex
 	sendCond   *sync.Cond
@@ -39,14 +43,15 @@ type Stream struct {
 	remoteDone bool
 }
 
-func newStream(c *Conn, id uint32, port uint16, sendWin uint32, recvLimit int) *Stream {
+func newStream(c *Conn, id uint32, port uint16, sendWin uint32, recvWindow, recvLimit int) *Stream {
 	st := &Stream{
-		id:        id,
-		port:      port,
-		c:         c,
-		ackCh:     make(chan struct{}),
-		sendWin:   int(sendWin),
-		recvLimit: recvLimit,
+		id:         id,
+		port:       port,
+		c:          c,
+		ackCh:      make(chan struct{}),
+		sendWin:    int(sendWin),
+		recvWindow: recvWindow,
+		recvLimit:  recvLimit,
 	}
 	if st.sendWin <= 0 {
 		st.sendWin = InitialWindow
@@ -78,7 +83,7 @@ func (s *Stream) WaitAck(ctx context.Context) (byte, error) {
 // Ack writes OPEN_ACK. The receiver may pipeline DATA before this returns.
 func (s *Stream) Ack(status byte) error {
 	return s.c.writeFrame(s.c.ctx, Frame{
-		Type: TypeOpenAck, StreamID: s.id, Status: status, Window: DefaultWindow,
+		Type: TypeOpenAck, StreamID: s.id, Status: status, Window: uint32(s.recvWindow),
 	})
 }
 
@@ -90,13 +95,16 @@ func (s *Stream) Read(p []byte) (int, error) {
 	if len(s.buf) > 0 {
 		n := copy(p, s.buf)
 		s.buf = s.buf[n:]
-		s.recvUsed -= n
-		if s.recvUsed < 0 {
-			s.recvUsed = 0
+		s.recvPending += n
+		credit := 0
+		if s.recvPending >= max(s.recvWindow/2, 1) {
+			credit = s.recvPending
+			s.recvPending = 0
+			s.recvUsed -= credit
 		}
 		s.mu.Unlock()
-		if n > 0 {
-			_ = s.c.writeFrame(s.c.ctx, Frame{Type: TypeWindow, StreamID: s.id, Window: uint32(n)})
+		if credit > 0 {
+			_ = s.c.writeFrame(s.c.ctx, Frame{Type: TypeWindow, StreamID: s.id, Window: uint32(credit)})
 		}
 		return n, nil
 	}

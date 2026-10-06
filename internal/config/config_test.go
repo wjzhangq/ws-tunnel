@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"ws-tunnel/internal/mux"
 )
 
 func write(t *testing.T, body string) string {
@@ -70,6 +72,30 @@ ports:
 	}
 	if len(cfg.Ports) != 1 || cfg.Ports[19080] == nil {
 		t.Fatalf("only port 19080 should survive, got %v", cfg.SortedPorts())
+	}
+}
+
+func TestStreamWindowSetting(t *testing.T) {
+	for _, tc := range []struct {
+		yaml  string
+		want  int
+		warns int
+	}{
+		{"", mux.DefaultWindow, 0},
+		{"settings:\n  stream_window: 1048576\n", 1 << 20, 0},
+		{"settings:\n  stream_window: 100\n", mux.DefaultWindow, 1},
+	} {
+		cfg, warnings, err := Load(write(t, "listen: \":8443\"\n"+tc.yaml+"nodes:\n  n1: {key: k1}\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Settings.StreamWindow != tc.want || len(warnings) != tc.warns {
+			t.Errorf("%q: window %d warnings %v, want %d with %d warnings",
+				tc.yaml, cfg.Settings.StreamWindow, warnings, tc.want, tc.warns)
+		}
+		if got := cfg.NodeConfig("n1").StreamWindow; got != tc.want {
+			t.Errorf("%q: pushed window %d, want %d", tc.yaml, got, tc.want)
+		}
 	}
 }
 

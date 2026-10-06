@@ -303,7 +303,7 @@ func (s *Server) serveSession(ctx context.Context, c *websocket.Conn, spec *conf
 	}
 	stats := s.registry.Stats(spec.Name)
 	sess := newNodeSession(spec.Name, nodeCfg, cfg.Settings.QueueTimeout, stats, s.log)
-	sess.AttachMux(mux.New(s.baseCtx, mux.WS{C: c}))
+	sess.AttachMux(mux.New(s.baseCtx, mux.WS{C: c}, mux.WithWindow(nodeCfg.StreamWindow)))
 
 	old := s.registry.Takeover(sess)
 	if old != nil {

@@ -32,6 +32,8 @@ type Conn struct {
 	nextID   uint32
 	acceptCh chan *Stream
 
+	window int // receive window advertised for every stream
+
 	controlCh chan *protocol.Message
 
 	// asyncOut carries frames the read loop wants sent. The read loop must
@@ -48,18 +50,35 @@ type Conn struct {
 	lastRead atomic.Int64 // unix nanos; any inbound frame
 }
 
+// Option tunes a Conn.
+type Option func(*Conn)
+
+// WithWindow sets the per-stream receive window, clamped to
+// [MinWindow, MaxWindow]. Zero keeps DefaultWindow.
+func WithWindow(n int) Option {
+	return func(c *Conn) {
+		if n > 0 {
+			c.window = min(max(n, MinWindow), MaxWindow)
+		}
+	}
+}
+
 // New starts the read loop immediately.
-func New(parent context.Context, t Transport) *Conn {
+func New(parent context.Context, t Transport, opts ...Option) *Conn {
 	ctx, cancel := context.WithCancel(parent)
 	c := &Conn{
 		t:         t,
 		streams:   map[uint32]*Stream{},
 		nextID:    1,
 		acceptCh:  make(chan *Stream, 64),
+		window:    DefaultWindow,
 		controlCh: make(chan *protocol.Message, 32),
 		asyncOut:  make(chan Frame, 256),
 		ctx:       ctx,
 		cancel:    cancel,
+	}
+	for _, o := range opts {
+		o(c)
 	}
 	c.lastRead.Store(time.Now().UnixNano())
 	go c.readLoop()
@@ -105,12 +124,12 @@ func (c *Conn) Open(ctx context.Context, port int) (*Stream, error) {
 	c.mu.Lock()
 	id := c.nextID
 	c.nextID++
-	st := newStream(c, id, uint16(port), InitialWindow, DefaultWindow)
+	st := newStream(c, id, uint16(port), InitialWindow, c.window, c.window)
 	c.streams[id] = st
 	c.mu.Unlock()
 
 	err := c.writeFrame(ctx, Frame{
-		Type: TypeOpen, StreamID: id, Port: uint16(port), Window: DefaultWindow,
+		Type: TypeOpen, StreamID: id, Port: uint16(port), Window: uint32(c.window),
 	})
 	if err != nil {
 		c.remove(id)
@@ -242,7 +261,7 @@ func (c *Conn) handleFrame(f Frame) {
 	case TypeOpen:
 		// The opener may pipeline InitialWindow bytes before it sees our
 		// OPEN_ACK, so we must buffer at least that much.
-		st := newStream(c, f.StreamID, f.Port, f.Window, max(DefaultWindow, InitialWindow))
+		st := newStream(c, f.StreamID, f.Port, f.Window, c.window, max(c.window, InitialWindow))
 		c.mu.Lock()
 		if _, exists := c.streams[f.StreamID]; exists {
 			c.mu.Unlock()

@@ -18,6 +18,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"ws-tunnel/internal/mux"
 	"ws-tunnel/internal/protocol"
 )
 
@@ -40,6 +41,9 @@ type Settings struct {
 	DialTimeout       time.Duration
 	QueueTimeout      time.Duration
 	MaxStreamsPerConn int
+	// StreamWindow is the per-stream receive window in bytes, used by both
+	// ends. A change applies to sessions established after the reload.
+	StreamWindow int
 }
 
 // NodeSpec is one entry under `nodes`.
@@ -75,6 +79,7 @@ type rawSettings struct {
 	DialTimeout       string `yaml:"dial_timeout"`
 	QueueTimeout      string `yaml:"queue_timeout"`
 	MaxStreamsPerConn int    `yaml:"max_streams_per_conn"`
+	StreamWindow      int    `yaml:"stream_window"`
 }
 
 type rawFile struct {
@@ -137,6 +142,14 @@ func Load(path string) (cfg *Config, warnings []string, err error) {
 				raw.Settings.MaxStreamsPerConn, DefaultMaxStreamsPerConn)
 		}
 		cfg.Settings.MaxStreamsPerConn = DefaultMaxStreamsPerConn
+	}
+	cfg.Settings.StreamWindow = raw.Settings.StreamWindow
+	if w := cfg.Settings.StreamWindow; w == 0 {
+		cfg.Settings.StreamWindow = mux.DefaultWindow
+	} else if w < mux.MinWindow || w > mux.MaxWindow {
+		warn("settings.stream_window=%d is outside %d..%d, using %d",
+			w, mux.MinWindow, mux.MaxWindow, mux.DefaultWindow)
+		cfg.Settings.StreamWindow = mux.DefaultWindow
 	}
 
 	reserved := map[int]string{}
@@ -240,6 +253,7 @@ func (c *Config) NodeConfig(node string) *protocol.NodeConfig {
 		Heartbeat:         protocol.Duration(c.Settings.Heartbeat),
 		DialTimeout:       protocol.Duration(c.Settings.DialTimeout),
 		MaxStreamsPerConn: c.Settings.MaxStreamsPerConn,
+		StreamWindow:      c.Settings.StreamWindow,
 	}
 }
 

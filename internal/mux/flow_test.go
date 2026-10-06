@@ -168,6 +168,53 @@ func TestPeerOverrunningWindowIsReset(t *testing.T) {
 	}
 }
 
+func TestWindowUpdatesAreBatched(t *testing.T) {
+	a, b := MemPair()
+	cli := New(t.Context(), b, WithWindow(MinWindow))
+	defer cli.Close()
+	peer := rawPeer{t, a}
+
+	peer.send(Frame{Type: TypeOpen, StreamID: 1, Port: 80, Window: MinWindow})
+	st, err := cli.Accept(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Ack(protocol.AckOK); err != nil {
+		t.Fatal(err)
+	}
+	if f, ok := peer.next(2 * time.Second); !ok || f.Type != TypeOpenAck || f.Window != MinWindow {
+		t.Fatalf("want OPEN_ACK advertising %d, got %+v", MinWindow, f)
+	}
+
+	peer.send(Frame{Type: TypeData, StreamID: 1, Payload: pattern(MinWindow)})
+	buf := make([]byte, 64)
+	for read := 0; read < MinWindow; {
+		n, err := st.Read(buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		read += n
+	}
+
+	var credited, frames int
+	for {
+		f, ok := peer.next(200 * time.Millisecond)
+		if !ok {
+			break
+		}
+		if f.Type == TypeWindow {
+			credited += int(f.Window)
+			frames++
+		}
+	}
+	if credited != MinWindow {
+		t.Fatalf("credited %d bytes, want %d", credited, MinWindow)
+	}
+	if frames > 2 {
+		t.Fatalf("%d WINDOW frames for %d one-shot reads; want them batched", frames, MinWindow/len(buf))
+	}
+}
+
 func TestOpenAckSmallWindowLimitsOpener(t *testing.T) {
 	a, b := MemPair()
 	srv := New(t.Context(), a)

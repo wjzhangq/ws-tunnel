@@ -81,6 +81,7 @@ type NodeConfig struct {
 	Heartbeat         Duration          `json:"heartbeat"`
 	DialTimeout       Duration          `json:"dial_timeout"`
 	MaxStreamsPerConn int               `json:"max_streams_per_conn"`
+	StreamWindow      int               `json:"stream_window,omitempty"`
 }
 
 // Equal reports whether two node configs are identical. Used by the reload
@@ -90,7 +91,8 @@ func (c *NodeConfig) Equal(o *NodeConfig) bool {
 		return c == o
 	}
 	if c.Channels != o.Channels || c.Heartbeat != o.Heartbeat ||
-		c.DialTimeout != o.DialTimeout || c.MaxStreamsPerConn != o.MaxStreamsPerConn {
+		c.DialTimeout != o.DialTimeout || c.MaxStreamsPerConn != o.MaxStreamsPerConn ||
+		c.StreamWindow != o.StreamWindow {
 		return false
 	}
 	if len(c.Ports) != len(o.Ports) {

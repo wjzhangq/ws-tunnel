@@ -32,7 +32,11 @@ const (
 	// the acceptor's real receive window. It is part of the wire contract.
 	InitialWindow = 64 * 1024
 	// DefaultWindow is the receive window this side advertises per stream.
-	DefaultWindow = 64 * 1024
+	// Per-stream throughput is capped at roughly window / RTT.
+	DefaultWindow = 256 * 1024
+	// MinWindow and MaxWindow bound WithWindow.
+	MinWindow = 4 * 1024
+	MaxWindow = 16 * 1024 * 1024
 )
 
 var (
