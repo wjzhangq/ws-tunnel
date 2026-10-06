@@ -182,12 +182,12 @@ func (c *Conn) readLoop() {
 			if err := json.Unmarshal(data, &msg); err != nil {
 				continue
 			}
+			// Never drop: a lost bye/reload_config/pong desyncs the session.
+			// Consumers drain Controls() until Done(), so this cannot wedge.
 			select {
 			case c.controlCh <- &msg:
 			case <-c.ctx.Done():
 				return
-			default:
-				// Control is lossy under overload; data frames must keep moving.
 			}
 		case websocket.MessageBinary:
 			f, err := decodeFrame(data)

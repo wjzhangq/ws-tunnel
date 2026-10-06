@@ -144,6 +144,37 @@ func TestControlJSONOnSameConn(t *testing.T) {
 	}
 }
 
+func TestControlNotDroppedUnderLoad(t *testing.T) {
+	ctx := t.Context()
+	a, b := MemPair()
+	srv := New(ctx, a)
+	cli := New(ctx, b)
+	defer srv.Close()
+	defer cli.Close()
+
+	const n = 1000
+	go func() {
+		for i := range n {
+			if err := srv.SendControl(ctx, &protocol.Message{Type: protocol.TypePing, TS: int64(i)}); err != nil {
+				t.Errorf("send %d: %v", i, err)
+				return
+			}
+		}
+	}()
+	// Let the sender run far ahead of the consumer before draining.
+	time.Sleep(100 * time.Millisecond)
+	for i := range n {
+		select {
+		case msg := <-cli.Controls():
+			if msg.TS != int64(i) {
+				t.Fatalf("message %d: got ts %d", i, msg.TS)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("message %d never arrived", i)
+		}
+	}
+}
+
 func TestOpenAckNotOK(t *testing.T) {
 	ctx := context.Background()
 	a, b := MemPair()
