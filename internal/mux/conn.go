@@ -16,8 +16,9 @@ import (
 )
 
 var (
-	ErrClosed     = errors.New("mux connection closed")
-	ErrUnknownStr = errors.New("unknown stream id")
+	ErrClosed         = errors.New("mux connection closed")
+	ErrUnknownStr     = errors.New("unknown stream id")
+	ErrWindowExceeded = errors.New("peer sent more data than the stream window allows")
 )
 
 // Conn multiplexes JSON control messages and binary streams on one Transport.
@@ -32,6 +33,10 @@ type Conn struct {
 	acceptCh chan *Stream
 
 	controlCh chan *protocol.Message
+
+	// asyncOut carries frames the read loop wants sent. The read loop must
+	// never block on a write, or two peers under backpressure can deadlock.
+	asyncOut chan Frame
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -52,11 +57,13 @@ func New(parent context.Context, t Transport) *Conn {
 		nextID:    1,
 		acceptCh:  make(chan *Stream, 64),
 		controlCh: make(chan *protocol.Message, 32),
+		asyncOut:  make(chan Frame, 256),
 		ctx:       ctx,
 		cancel:    cancel,
 	}
 	c.lastRead.Store(time.Now().UnixNano())
 	go c.readLoop()
+	go c.asyncWriteLoop()
 	return c
 }
 
@@ -98,7 +105,7 @@ func (c *Conn) Open(ctx context.Context, port int) (*Stream, error) {
 	c.mu.Lock()
 	id := c.nextID
 	c.nextID++
-	st := newStream(c, id, uint16(port), InitialWindow)
+	st := newStream(c, id, uint16(port), InitialWindow, DefaultWindow)
 	c.streams[id] = st
 	c.mu.Unlock()
 
@@ -163,6 +170,33 @@ func (c *Conn) writeFrame(ctx context.Context, f Frame) error {
 	return c.t.Write(ctx, websocket.MessageBinary, b)
 }
 
+// sendAsync queues a best-effort frame (RST) from the read loop. When the
+// queue is full the frame is dropped; the peer will learn of the reset from
+// the next frame it sends for that stream.
+func (c *Conn) sendAsync(f Frame) {
+	select {
+	case c.asyncOut <- f:
+	default:
+	}
+}
+
+func (c *Conn) asyncWriteLoop() {
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case f := <-c.asyncOut:
+			if err := c.writeFrame(c.ctx, f); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (c *Conn) rst(id uint32) {
+	c.sendAsync(Frame{Type: TypeRst, StreamID: id, Reason: protocol.AckRejected})
+}
+
 func (c *Conn) readLoop() {
 	defer c.closeWith(io.EOF)
 	for {
@@ -206,11 +240,13 @@ func (c *Conn) readLoop() {
 func (c *Conn) handleFrame(f Frame) {
 	switch f.Type {
 	case TypeOpen:
-		st := newStream(c, f.StreamID, f.Port, f.Window)
+		// The opener may pipeline InitialWindow bytes before it sees our
+		// OPEN_ACK, so we must buffer at least that much.
+		st := newStream(c, f.StreamID, f.Port, f.Window, max(DefaultWindow, InitialWindow))
 		c.mu.Lock()
 		if _, exists := c.streams[f.StreamID]; exists {
 			c.mu.Unlock()
-			_ = c.writeFrame(c.ctx, Frame{Type: TypeRst, StreamID: f.StreamID, Reason: protocol.AckRejected})
+			c.rst(f.StreamID)
 			return
 		}
 		c.streams[f.StreamID] = st
@@ -220,7 +256,7 @@ func (c *Conn) handleFrame(f Frame) {
 		default:
 			c.remove(f.StreamID)
 			st.fail(errors.New("accept queue full"))
-			_ = c.writeFrame(c.ctx, Frame{Type: TypeRst, StreamID: f.StreamID, Reason: protocol.AckRejected})
+			c.rst(f.StreamID)
 		}
 	case TypeOpenAck:
 		st := c.stream(f.StreamID)
@@ -231,10 +267,14 @@ func (c *Conn) handleFrame(f Frame) {
 	case TypeData:
 		st := c.stream(f.StreamID)
 		if st == nil {
-			_ = c.writeFrame(c.ctx, Frame{Type: TypeRst, StreamID: f.StreamID, Reason: protocol.AckRejected})
+			c.rst(f.StreamID)
 			return
 		}
-		st.gotData(f.Payload)
+		if !st.gotData(f.Payload) {
+			c.remove(f.StreamID)
+			st.fail(ErrWindowExceeded)
+			c.rst(f.StreamID)
+		}
 	case TypeFin:
 		st := c.stream(f.StreamID)
 		if st != nil {

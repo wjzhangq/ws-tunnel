@@ -125,6 +125,49 @@ func TestSmallPeerWindowMakesProgress(t *testing.T) {
 	}
 }
 
+func TestPeerOverrunningWindowIsReset(t *testing.T) {
+	a, b := MemPair()
+	cli := New(t.Context(), b)
+	defer cli.Close()
+	peer := rawPeer{t, a}
+
+	peer.send(Frame{Type: TypeOpen, StreamID: 1, Port: 80, Window: DefaultWindow})
+	st, err := cli.Accept(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	limit := max(DefaultWindow, InitialWindow)
+	for sent := 0; sent < limit; sent += MaxPayload {
+		peer.send(Frame{Type: TypeData, StreamID: 1, Payload: pattern(min(MaxPayload, limit-sent))})
+	}
+	peer.send(Frame{Type: TypeData, StreamID: 1, Payload: []byte("x")})
+
+	for {
+		f, ok := peer.next(2 * time.Second)
+		if !ok {
+			t.Fatal("no RST after window overrun")
+		}
+		if f.Type == TypeRst && f.StreamID == 1 {
+			break
+		}
+	}
+	buf := make([]byte, limit+1)
+	var n int
+	for {
+		m, err := st.Read(buf[n:])
+		n += m
+		if err != nil {
+			if err != ErrWindowExceeded {
+				t.Fatalf("read err = %v, want ErrWindowExceeded", err)
+			}
+			break
+		}
+	}
+	if n > limit {
+		t.Fatalf("buffered %d bytes past the %d window", n, limit)
+	}
+}
+
 func TestOpenAckSmallWindowLimitsOpener(t *testing.T) {
 	a, b := MemPair()
 	srv := New(t.Context(), a)

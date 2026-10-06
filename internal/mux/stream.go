@@ -25,7 +25,10 @@ type Stream struct {
 	buf      []byte
 	readEOF  bool
 	readErr  error
-	recvUsed int
+	// recvUsed is bytes received but not yet credited back with WINDOW;
+	// the peer may never push it past recvLimit.
+	recvUsed  int
+	recvLimit int
 
 	sendMu     sync.Mutex
 	sendCond   *sync.Cond
@@ -36,13 +39,14 @@ type Stream struct {
 	remoteDone bool
 }
 
-func newStream(c *Conn, id uint32, port uint16, sendWin uint32) *Stream {
+func newStream(c *Conn, id uint32, port uint16, sendWin uint32, recvLimit int) *Stream {
 	st := &Stream{
-		id:      id,
-		port:    port,
-		c:       c,
-		ackCh:   make(chan struct{}),
-		sendWin: int(sendWin),
+		id:        id,
+		port:      port,
+		c:         c,
+		ackCh:     make(chan struct{}),
+		sendWin:   int(sendWin),
+		recvLimit: recvLimit,
 	}
 	if st.sendWin <= 0 {
 		st.sendWin = InitialWindow
@@ -218,15 +222,21 @@ func (s *Stream) gotAck(status byte, window uint32) {
 	}
 }
 
-func (s *Stream) gotData(p []byte) {
+// gotData buffers a DATA payload. It returns false when the peer overran the
+// window it was granted; the caller resets the stream.
+func (s *Stream) gotData(p []byte) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.recvUsed+len(p) > s.recvLimit {
+		return false
+	}
+	s.recvUsed += len(p)
 	if s.readEOF || s.readErr != nil {
-		return
+		return true
 	}
 	s.buf = append(s.buf, p...)
-	s.recvUsed += len(p)
 	s.cond.Broadcast()
+	return true
 }
 
 func (s *Stream) gotFin() {
