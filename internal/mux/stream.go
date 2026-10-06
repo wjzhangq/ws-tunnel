@@ -45,7 +45,7 @@ func newStream(c *Conn, id uint32, port uint16, sendWin uint32) *Stream {
 		sendWin: int(sendWin),
 	}
 	if st.sendWin <= 0 {
-		st.sendWin = DefaultWindow
+		st.sendWin = InitialWindow
 	}
 	st.cond = sync.NewCond(&st.mu)
 	st.sendCond = sync.NewCond(&st.sendMu)
@@ -110,36 +110,39 @@ func (s *Stream) Write(p []byte) (int, error) {
 	}
 	wrote := 0
 	for len(p) > 0 {
-		chunk := p
-		if len(chunk) > MaxPayload {
-			chunk = chunk[:MaxPayload]
-		}
-		if err := s.writeChunk(chunk); err != nil {
+		n, err := s.writeSome(p)
+		wrote += n
+		if err != nil {
 			return wrote, err
 		}
-		wrote += len(chunk)
-		p = p[len(chunk):]
+		p = p[n:]
 	}
 	return wrote, nil
 }
 
-func (s *Stream) writeChunk(p []byte) error {
+// writeSome sends one DATA frame sized to whatever credit the peer has left,
+// so a peer window smaller than MaxPayload still makes progress.
+func (s *Stream) writeSome(p []byte) (int, error) {
 	s.sendMu.Lock()
-	for s.sendWin < len(p) && s.writeErr == nil && !s.writeEOF {
+	for s.sendWin <= 0 && s.writeErr == nil && !s.writeEOF {
 		s.sendCond.Wait()
 	}
 	if s.writeErr != nil {
 		err := s.writeErr
 		s.sendMu.Unlock()
-		return err
+		return 0, err
 	}
 	if s.writeEOF {
 		s.sendMu.Unlock()
-		return io.ErrClosedPipe
+		return 0, io.ErrClosedPipe
 	}
-	s.sendWin -= len(p)
+	n := min(len(p), s.sendWin, MaxPayload)
+	s.sendWin -= n
 	s.sendMu.Unlock()
-	return s.c.writeFrame(s.c.ctx, Frame{Type: TypeData, StreamID: s.id, Payload: p})
+	if err := s.c.writeFrame(s.c.ctx, Frame{Type: TypeData, StreamID: s.id, Payload: p[:n]}); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // CloseWrite signals end-of-direction (TCP FIN).
@@ -197,12 +200,15 @@ func (s *Stream) SetWriteDeadline(t time.Time) error {
 }
 
 func (s *Stream) gotAck(status byte, window uint32) {
-	s.sendMu.Lock()
-	if window > 0 {
-		s.sendWin = int(window)
+	// The opener started with InitialWindow of credit and may already have
+	// spent some of it, so the advertised window adjusts the balance rather
+	// than replacing it. A balance below zero just blocks until WINDOW frames.
+	if window > 0 && int(window) != InitialWindow {
+		s.sendMu.Lock()
+		s.sendWin += int(window) - InitialWindow
 		s.sendCond.Broadcast()
+		s.sendMu.Unlock()
 	}
-	s.sendMu.Unlock()
 	s.ackOnce.Do(func() {
 		s.ackStatus = status
 		close(s.ackCh)
@@ -238,13 +244,6 @@ func (s *Stream) addSendWindow(n int) {
 	}
 	s.sendMu.Lock()
 	s.sendWin += n
-	s.sendCond.Broadcast()
-	s.sendMu.Unlock()
-}
-
-func (s *Stream) setSendWindow(n int) {
-	s.sendMu.Lock()
-	s.sendWin = n
 	s.sendCond.Broadcast()
 	s.sendMu.Unlock()
 }

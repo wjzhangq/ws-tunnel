@@ -28,7 +28,10 @@ const (
 	// MaxPayload is the largest DATA body. It stays well under the WS read
 	// limit (1 MiB) so a hostile peer cannot force huge allocations per frame.
 	MaxPayload = 32 * 1024
-	// DefaultWindow is the initial per-stream send/recv credit in bytes.
+	// InitialWindow is the credit an opener may spend before OPEN_ACK tells it
+	// the acceptor's real receive window. It is part of the wire contract.
+	InitialWindow = 64 * 1024
+	// DefaultWindow is the receive window this side advertises per stream.
 	DefaultWindow = 64 * 1024
 )
 

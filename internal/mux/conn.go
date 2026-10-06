@@ -98,7 +98,7 @@ func (c *Conn) Open(ctx context.Context, port int) (*Stream, error) {
 	c.mu.Lock()
 	id := c.nextID
 	c.nextID++
-	st := newStream(c, id, uint16(port), DefaultWindow)
+	st := newStream(c, id, uint16(port), InitialWindow)
 	c.streams[id] = st
 	c.mu.Unlock()
 
@@ -207,9 +207,6 @@ func (c *Conn) handleFrame(f Frame) {
 	switch f.Type {
 	case TypeOpen:
 		st := newStream(c, f.StreamID, f.Port, f.Window)
-		if f.Window == 0 {
-			st.setSendWindow(DefaultWindow)
-		}
 		c.mu.Lock()
 		if _, exists := c.streams[f.StreamID]; exists {
 			c.mu.Unlock()
