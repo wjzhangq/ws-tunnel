@@ -3,6 +3,9 @@ package mux
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
+	"os"
 	"testing"
 	"time"
 
@@ -213,6 +216,53 @@ func TestWindowUpdatesAreBatched(t *testing.T) {
 	if frames > 2 {
 		t.Fatalf("%d WINDOW frames for %d one-shot reads; want them batched", frames, MinWindow/len(buf))
 	}
+}
+
+func TestReadDeadline(t *testing.T) {
+	a, b := MemPair()
+	cli := New(t.Context(), b, Client)
+	defer cli.Close()
+	peer := rawPeer{t, a}
+
+	peer.send(Frame{Type: TypeOpen, StreamID: 1, Port: 80, Window: DefaultWindow})
+	st, err := cli.Accept(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = st.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	start := time.Now()
+	if _, err := st.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("read err = %v, want deadline exceeded", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("deadline fired far too late")
+	}
+
+	_ = st.SetReadDeadline(time.Time{})
+	peer.send(Frame{Type: TypeData, StreamID: 1, Payload: []byte("ok")})
+	buf := make([]byte, 2)
+	if _, err := io.ReadFull(st, buf); err != nil || string(buf) != "ok" {
+		t.Fatalf("read after clearing deadline: %q %v", buf, err)
+	}
+}
+
+func TestWriteDeadlineWhileWaitingForCredit(t *testing.T) {
+	a, b := MemPair()
+	cli := New(t.Context(), b, Client)
+	defer cli.Close()
+	peer := rawPeer{t, a}
+
+	peer.send(Frame{Type: TypeOpen, StreamID: 1, Port: 80, Window: 1000})
+	st, err := cli.Accept(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = st.SetWriteDeadline(time.Now().Add(50 * time.Millisecond))
+	n, err := st.Write(pattern(5000))
+	if n != 1000 || !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("write = %d, %v; want 1000, deadline exceeded", n, err)
+	}
+	peer.readData(1000)
 }
 
 func TestOpenAckSmallWindowLimitsOpener(t *testing.T) {

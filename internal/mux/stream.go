@@ -3,6 +3,7 @@ package mux
 import (
 	"context"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -29,18 +30,47 @@ type Stream struct {
 	// the peer may never push it past recvLimit. recvPending is the part of
 	// recvUsed already consumed by Read, returned once it reaches half of
 	// recvWindow so WINDOW frames are batched rather than one per Read.
-	recvUsed    int
-	recvPending int
-	recvWindow  int
-	recvLimit   int
+	recvUsed     int
+	recvPending  int
+	recvWindow   int
+	recvLimit    int
+	readDeadline deadline
 
-	sendMu     sync.Mutex
-	sendCond   *sync.Cond
-	sendWin    int
-	writeEOF   bool
-	writeErr   error
-	localDone  bool
-	remoteDone bool
+	sendMu        sync.Mutex
+	sendCond      *sync.Cond
+	sendWin       int
+	writeEOF      bool
+	writeErr      error
+	writeDeadline deadline
+}
+
+// deadline wakes a cond when it expires. It is guarded by the mutex that
+// backs that cond.
+type deadline struct {
+	at    time.Time
+	timer *time.Timer
+}
+
+func (d *deadline) set(t time.Time, mu sync.Locker, cond *sync.Cond) {
+	if d.timer != nil {
+		d.timer.Stop()
+		d.timer = nil
+	}
+	d.at = t
+	if !t.IsZero() {
+		if wait := time.Until(t); wait > 0 {
+			d.timer = time.AfterFunc(wait, func() {
+				mu.Lock()
+				cond.Broadcast()
+				mu.Unlock()
+			})
+		}
+	}
+	cond.Broadcast()
+}
+
+func (d *deadline) expired() bool {
+	return !d.at.IsZero() && !time.Now().Before(d.at)
 }
 
 func newStream(c *Conn, id uint32, port uint16, sendWin uint32, recvWindow, recvLimit int) *Stream {
@@ -89,7 +119,14 @@ func (s *Stream) Ack(status byte) error {
 
 func (s *Stream) Read(p []byte) (int, error) {
 	s.mu.Lock()
-	for len(s.buf) == 0 && !s.readEOF && s.readErr == nil {
+	for {
+		if s.readDeadline.expired() {
+			s.mu.Unlock()
+			return 0, os.ErrDeadlineExceeded
+		}
+		if len(s.buf) > 0 || s.readEOF || s.readErr != nil {
+			break
+		}
 		s.cond.Wait()
 	}
 	if len(s.buf) > 0 {
@@ -137,6 +174,10 @@ func (s *Stream) Write(p []byte) (int, error) {
 func (s *Stream) writeSome(p []byte) (int, error) {
 	s.sendMu.Lock()
 	for s.sendWin <= 0 && s.writeErr == nil && !s.writeEOF {
+		if s.writeDeadline.expired() {
+			s.sendMu.Unlock()
+			return 0, os.ErrDeadlineExceeded
+		}
 		s.sendCond.Wait()
 	}
 	if s.writeErr != nil {
@@ -199,15 +240,26 @@ func (s *Stream) Close() error {
 }
 
 func (s *Stream) SetDeadline(t time.Time) error {
-	_ = t
-	return nil
+	_ = s.SetReadDeadline(t)
+	return s.SetWriteDeadline(t)
 }
+
+// SetReadDeadline makes a pending or future Read fail with
+// os.ErrDeadlineExceeded once t passes. The zero time clears it.
 func (s *Stream) SetReadDeadline(t time.Time) error {
-	_ = t
+	s.mu.Lock()
+	s.readDeadline.set(t, &s.mu, s.cond)
+	s.mu.Unlock()
 	return nil
 }
+
+// SetWriteDeadline bounds how long Write waits for peer credit. It does not
+// interrupt a frame already handed to the WebSocket: cancelling that write
+// would close the whole connection, not just this stream.
 func (s *Stream) SetWriteDeadline(t time.Time) error {
-	_ = t
+	s.sendMu.Lock()
+	s.writeDeadline.set(t, &s.sendMu, s.sendCond)
+	s.sendMu.Unlock()
 	return nil
 }
 
@@ -250,7 +302,6 @@ func (s *Stream) gotData(p []byte) bool {
 func (s *Stream) gotFin() {
 	s.mu.Lock()
 	s.readEOF = true
-	s.remoteDone = true
 	s.cond.Broadcast()
 	s.mu.Unlock()
 	s.maybeRemove()
