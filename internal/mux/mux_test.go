@@ -53,8 +53,8 @@ func TestStreamPipesBytesAndHalfClose(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	a, b := MemPair()
-	srv := New(ctx, a)
-	cli := New(ctx, b)
+	srv := New(ctx, a, Server)
+	cli := New(ctx, b, Client)
 	defer srv.Close()
 	defer cli.Close()
 
@@ -126,8 +126,8 @@ func TestStreamPipesBytesAndHalfClose(t *testing.T) {
 func TestControlJSONOnSameConn(t *testing.T) {
 	ctx := context.Background()
 	a, b := MemPair()
-	srv := New(ctx, a)
-	cli := New(ctx, b)
+	srv := New(ctx, a, Server)
+	cli := New(ctx, b, Client)
 	defer srv.Close()
 	defer cli.Close()
 
@@ -147,8 +147,8 @@ func TestControlJSONOnSameConn(t *testing.T) {
 func TestControlNotDroppedUnderLoad(t *testing.T) {
 	ctx := t.Context()
 	a, b := MemPair()
-	srv := New(ctx, a)
-	cli := New(ctx, b)
+	srv := New(ctx, a, Server)
+	cli := New(ctx, b, Client)
 	defer srv.Close()
 	defer cli.Close()
 
@@ -175,11 +175,65 @@ func TestControlNotDroppedUnderLoad(t *testing.T) {
 	}
 }
 
+func TestBothSidesOpenWithoutIDClash(t *testing.T) {
+	ctx := t.Context()
+	a, b := MemPair()
+	srv := New(ctx, a, Server)
+	cli := New(ctx, b, Client)
+	defer srv.Close()
+	defer cli.Close()
+
+	const n = 20
+	for _, side := range []struct {
+		open, accept *Conn
+		parity       uint32
+	}{{srv, cli, 1}, {cli, srv, 0}} {
+		go func() {
+			for i := range n {
+				st, err := side.open.Open(ctx, 1000+i)
+				if err != nil {
+					t.Errorf("open: %v", err)
+					return
+				}
+				if st.ID()%2 != side.parity {
+					t.Errorf("id %d has the wrong parity", st.ID())
+				}
+			}
+		}()
+	}
+	for _, c := range []*Conn{srv, cli} {
+		seen := map[int]bool{}
+		for range n {
+			st, err := c.Accept(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seen[st.Port()] = true
+		}
+		if len(seen) != n {
+			t.Fatalf("accepted %d distinct ports, want %d", len(seen), n)
+		}
+	}
+}
+
+func TestOpenWithOwnParityIsReset(t *testing.T) {
+	a, b := MemPair()
+	cli := New(t.Context(), b, Client)
+	defer cli.Close()
+	peer := rawPeer{t, a}
+
+	peer.send(Frame{Type: TypeOpen, StreamID: 2, Port: 80, Window: DefaultWindow})
+	f, ok := peer.next(2 * time.Second)
+	if !ok || f.Type != TypeRst || f.StreamID != 2 {
+		t.Fatalf("want RST for even id from the server, got %+v", f)
+	}
+}
+
 func TestOpenAckNotOK(t *testing.T) {
 	ctx := context.Background()
 	a, b := MemPair()
-	srv := New(ctx, a)
-	cli := New(ctx, b)
+	srv := New(ctx, a, Server)
+	cli := New(ctx, b, Client)
 	defer srv.Close()
 	defer cli.Close()
 

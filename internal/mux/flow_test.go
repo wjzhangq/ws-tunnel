@@ -95,7 +95,7 @@ func pattern(n int) []byte {
 
 func TestSmallPeerWindowMakesProgress(t *testing.T) {
 	a, b := MemPair()
-	cli := New(t.Context(), b)
+	cli := New(t.Context(), b, Client)
 	defer cli.Close()
 	peer := rawPeer{t, a}
 
@@ -127,7 +127,7 @@ func TestSmallPeerWindowMakesProgress(t *testing.T) {
 
 func TestPeerOverrunningWindowIsReset(t *testing.T) {
 	a, b := MemPair()
-	cli := New(t.Context(), b)
+	cli := New(t.Context(), b, Client)
 	defer cli.Close()
 	peer := rawPeer{t, a}
 
@@ -170,7 +170,7 @@ func TestPeerOverrunningWindowIsReset(t *testing.T) {
 
 func TestWindowUpdatesAreBatched(t *testing.T) {
 	a, b := MemPair()
-	cli := New(t.Context(), b, WithWindow(MinWindow))
+	cli := New(t.Context(), b, Client, WithWindow(MinWindow))
 	defer cli.Close()
 	peer := rawPeer{t, a}
 
@@ -217,7 +217,7 @@ func TestWindowUpdatesAreBatched(t *testing.T) {
 
 func TestOpenAckSmallWindowLimitsOpener(t *testing.T) {
 	a, b := MemPair()
-	srv := New(t.Context(), a)
+	srv := New(t.Context(), a, Server)
 	defer srv.Close()
 	peer := rawPeer{t, b}
 
@@ -242,7 +242,7 @@ func TestOpenAckSmallWindowLimitsOpener(t *testing.T) {
 
 func TestOpenAckDoesNotRefillPipelinedCredit(t *testing.T) {
 	a, b := MemPair()
-	srv := New(t.Context(), a)
+	srv := New(t.Context(), a, Server)
 	defer srv.Close()
 	peer := rawPeer{t, b}
 

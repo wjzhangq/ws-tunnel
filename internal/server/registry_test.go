@@ -33,8 +33,8 @@ func newTestSession(t *testing.T, maxStreams int, queueTimeout time.Duration) *N
 	t.Helper()
 	ctx := t.Context()
 	a, b := mux.MemPair()
-	srvMux := mux.New(ctx, a)
-	cliMux := mux.New(ctx, b)
+	srvMux := mux.New(ctx, a, mux.Server)
+	cliMux := mux.New(ctx, b, mux.Client)
 	go autoPeer(ctx, cliMux)
 	t.Cleanup(func() {
 		srvMux.Close()

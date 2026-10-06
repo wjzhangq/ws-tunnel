@@ -141,7 +141,7 @@ func (c *Client) runSession(ctx context.Context) error {
 	cfg := c.Config()
 	c.draining.Store(false)
 
-	sess := mux.New(ctx, mux.WS{C: conn}, mux.WithWindow(cfg.StreamWindow))
+	sess := mux.New(ctx, mux.WS{C: conn}, mux.Client, mux.WithWindow(cfg.StreamWindow))
 	c.setMux(sess)
 	defer func() {
 		c.setMux(nil)

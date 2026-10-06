@@ -34,8 +34,8 @@ func newForwardFixture(t *testing.T, dialTimeout time.Duration) *forwardFixture 
 	}
 	sess := newNodeSession("node1", nodeCfg, time.Second, srv.registry.Stats("node1"), srv.log)
 	a, b := mux.MemPair()
-	srvMux := mux.New(t.Context(), a)
-	cliMux := mux.New(t.Context(), b)
+	srvMux := mux.New(t.Context(), a, mux.Server)
+	cliMux := mux.New(t.Context(), b, mux.Client)
 	sess.AttachMux(srvMux)
 	if err := srv.registry.Register(sess); err != nil {
 		t.Fatalf("register: %v", err)

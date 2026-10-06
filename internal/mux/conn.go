@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,11 +20,13 @@ var (
 	ErrClosed         = errors.New("mux connection closed")
 	ErrUnknownStr     = errors.New("unknown stream id")
 	ErrWindowExceeded = errors.New("peer sent more data than the stream window allows")
+	ErrIDsExhausted   = errors.New("mux stream ids exhausted; reconnect")
 )
 
 // Conn multiplexes JSON control messages and binary streams on one Transport.
 type Conn struct {
-	t Transport
+	t    Transport
+	side Side
 
 	writeMu sync.Mutex
 
@@ -50,6 +53,15 @@ type Conn struct {
 	lastRead atomic.Int64 // unix nanos; any inbound frame
 }
 
+// Side fixes stream-id parity so both ends may open streams without
+// colliding: the server allocates odd ids, the client even ones.
+type Side uint8
+
+const (
+	Server Side = iota
+	Client
+)
+
 // Option tunes a Conn.
 type Option func(*Conn)
 
@@ -64,12 +76,13 @@ func WithWindow(n int) Option {
 }
 
 // New starts the read loop immediately.
-func New(parent context.Context, t Transport, opts ...Option) *Conn {
+func New(parent context.Context, t Transport, side Side, opts ...Option) *Conn {
 	ctx, cancel := context.WithCancel(parent)
 	c := &Conn{
 		t:         t,
+		side:      side,
 		streams:   map[uint32]*Stream{},
-		nextID:    1,
+		nextID:    1 + uint32(side),
 		acceptCh:  make(chan *Stream, 64),
 		window:    DefaultWindow,
 		controlCh: make(chan *protocol.Message, 32),
@@ -123,7 +136,11 @@ func (c *Conn) Open(ctx context.Context, port int) (*Stream, error) {
 	}
 	c.mu.Lock()
 	id := c.nextID
-	c.nextID++
+	if id > math.MaxUint32-2 {
+		c.mu.Unlock()
+		return nil, ErrIDsExhausted
+	}
+	c.nextID += 2
 	st := newStream(c, id, uint16(port), InitialWindow, c.window, c.window)
 	c.streams[id] = st
 	c.mu.Unlock()
@@ -259,6 +276,10 @@ func (c *Conn) readLoop() {
 func (c *Conn) handleFrame(f Frame) {
 	switch f.Type {
 	case TypeOpen:
+		if !c.peerID(f.StreamID) {
+			c.rst(f.StreamID)
+			return
+		}
 		// The opener may pipeline InitialWindow bytes before it sees our
 		// OPEN_ACK, so we must buffer at least that much.
 		st := newStream(c, f.StreamID, f.Port, f.Window, c.window, max(c.window, InitialWindow))
@@ -311,6 +332,11 @@ func (c *Conn) handleFrame(f Frame) {
 			st.addSendWindow(int(f.Window))
 		}
 	}
+}
+
+// peerID reports whether id has the parity the peer is allowed to open.
+func (c *Conn) peerID(id uint32) bool {
+	return id != 0 && id%2 != (1+uint32(c.side))%2
 }
 
 func (c *Conn) stream(id uint32) *Stream {
