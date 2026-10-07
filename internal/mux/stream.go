@@ -17,9 +17,13 @@ type Stream struct {
 	port uint16
 	c    *Conn
 
+	// ackCh closes on OPEN_ACK or on failure; acked tells the two apart.
+	// Both fields are written before the close, so readers after it see them.
 	ackOnce   sync.Once
 	ackCh     chan struct{}
+	acked     bool
 	ackStatus byte
+	ackErr    error
 
 	mu       sync.Mutex
 	cond     *sync.Cond
@@ -94,19 +98,17 @@ func newStream(c *Conn, id uint32, port uint16, sendWin uint32, recvWindow, recv
 func (s *Stream) ID() uint32 { return s.id }
 func (s *Stream) Port() int  { return int(s.port) }
 
-// WaitAck blocks until OPEN_ACK, the stream fails, or ctx ends.
+// WaitAck blocks until OPEN_ACK, the stream fails, or ctx ends. An ack that
+// arrived is reported even if the stream failed afterwards.
 func (s *Stream) WaitAck(ctx context.Context) (byte, error) {
 	select {
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	case <-s.ackCh:
-		s.mu.Lock()
-		err := s.readErr
-		s.mu.Unlock()
-		if err != nil && s.ackStatus == 0 {
-			return 0, err
+		if s.acked {
+			return s.ackStatus, nil
 		}
-		return s.ackStatus, nil
+		return 0, s.ackErr
 	}
 }
 
@@ -274,6 +276,7 @@ func (s *Stream) gotAck(status byte, window uint32) {
 		s.sendMu.Unlock()
 	}
 	s.ackOnce.Do(func() {
+		s.acked = true
 		s.ackStatus = status
 		close(s.ackCh)
 	})
@@ -333,7 +336,10 @@ func (s *Stream) fail(err error) {
 	s.sendCond.Broadcast()
 	s.sendMu.Unlock()
 
-	s.ackOnce.Do(func() { close(s.ackCh) })
+	s.ackOnce.Do(func() {
+		s.ackErr = err
+		close(s.ackCh)
+	})
 }
 
 func (s *Stream) maybeRemove() {

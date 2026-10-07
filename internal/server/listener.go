@@ -331,8 +331,13 @@ func (s *Server) forward(pl *portListener, conn net.Conn) {
 	status, err := st.WaitAck(ackCtx)
 	ackCancel()
 	if err != nil {
-		stats.RecordResult("timeout")
-		s.log.Warn("no ack from client", "port", pl.port, "node", pl.node, "err", err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			stats.RecordResult("timeout")
+			s.log.Warn("no ack from client", "port", pl.port, "node", pl.node, "err", err)
+		} else {
+			stats.RecordResult("rejected")
+			s.log.Warn("stream failed before ack", "port", pl.port, "node", pl.node, "err", err)
+		}
 		return
 	}
 

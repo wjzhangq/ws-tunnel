@@ -265,6 +265,42 @@ func TestWriteDeadlineWhileWaitingForCredit(t *testing.T) {
 	peer.readData(1000)
 }
 
+func TestWaitAckReportsAckDespiteLaterReset(t *testing.T) {
+	a, b := MemPair()
+	srv := New(t.Context(), a, Server)
+	defer srv.Close()
+	peer := rawPeer{t, b}
+
+	st, err := srv.Open(t.Context(), 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, ok := peer.next(2 * time.Second); !ok || f.Type != TypeOpen {
+		t.Fatalf("want OPEN, got %+v", f)
+	}
+	peer.send(Frame{Type: TypeOpenAck, StreamID: st.ID(), Status: protocol.AckOK, Window: DefaultWindow})
+	peer.send(Frame{Type: TypeRst, StreamID: st.ID(), Reason: protocol.AckRejected})
+	// Wait for the RST to land before asking, which is the racy order.
+	for deadline := time.Now().Add(2 * time.Second); srv.stream(st.ID()) != nil; {
+		if time.Now().After(deadline) {
+			t.Fatal("RST never processed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if status, err := st.WaitAck(t.Context()); err != nil || status != protocol.AckOK {
+		t.Fatalf("WaitAck = %d, %v; want AckOK", status, err)
+	}
+
+	st2, err := srv.Open(t.Context(), 80)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer.send(Frame{Type: TypeRst, StreamID: st2.ID(), Reason: protocol.AckRejected})
+	if _, err := st2.WaitAck(t.Context()); err == nil {
+		t.Fatal("WaitAck after a bare RST must fail")
+	}
+}
+
 func TestOpenAckSmallWindowLimitsOpener(t *testing.T) {
 	a, b := MemPair()
 	srv := New(t.Context(), a, Server)
