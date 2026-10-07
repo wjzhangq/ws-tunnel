@@ -86,7 +86,7 @@ func (c *Client) Status() ClientStatus {
 
 	st.Channels.Online = int(c.channelsOnline.Load())
 	if cfg := c.Config(); cfg != nil {
-		st.Channels.Configured = cfg.Channels
+		st.Channels.Configured = 1
 		for port, remote := range cfg.Ports {
 			st.Ports = append(st.Ports, portView{Port: port, Remote: remote})
 		}

@@ -24,15 +24,15 @@ settings:
   # 范围 4096..16777216,默认 262144;修改只对之后新建的会话生效。
   stream_window: 262144
 
-# ── node 管理:只放身份与容量 ────────────────────────────────
+# ── node 管理:只放身份 ──────────────────────────────────────
+# 每个 node 固定一条 WebSocket,并发上限看 settings.max_streams_per_conn。
+# 旧版的 `channels` 字段已废弃,写了只会打 WARN 并被忽略。
 # 运行时状态(是否在线、连接/离线时间)不写回本文件,只在 /status 呈现。
 nodes:
   node1:
     key: "xx1"      # 全局唯一;重复时保留文档中先出现的那条,后者丢弃并打 WARN
-    channels: 4     # 保留字段;实现固定 1 条 WebSocket,并发上限看 max_streams_per_conn
   node2:
     key: "xx2"
-    channels: 2
 
 # ── 端口映射 ─────────────────────────────────────────────
 # key = server 反向监听端口号(纯数字),同时也是流头里的端口 id。

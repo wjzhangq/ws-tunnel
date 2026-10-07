@@ -27,7 +27,7 @@ func TestWelcomeFromOldServerIsRefused(t *testing.T) {
 			return
 		}
 		_ = wsutil.WriteJSON(r.Context(), c, &protocol.Message{
-			Type: protocol.TypeWelcome, Session: "s1", Channels: 4,
+			Type: protocol.TypeWelcome, Session: "s1",
 			Config: &protocol.NodeConfig{Ports: map[string]string{}},
 		})
 		_, _, _ = c.Read(r.Context())

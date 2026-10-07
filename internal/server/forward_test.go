@@ -28,7 +28,6 @@ func newForwardFixture(t *testing.T, dialTimeout time.Duration) *forwardFixture 
 	srv.baseCtx = t.Context()
 
 	nodeCfg := &protocol.NodeConfig{
-		Channels:          1,
 		MaxStreamsPerConn: 8,
 		DialTimeout:       protocol.Duration(dialTimeout),
 	}

@@ -28,7 +28,6 @@ const (
 	DefaultDialTimeout       = 10 * time.Second
 	DefaultQueueTimeout      = 5 * time.Second
 	DefaultMaxStreamsPerConn = 256
-	DefaultChannels          = 4
 
 	// ListenHost is fixed by design: reverse listeners always bind loopback
 	// and there is no config knob for it (§3.2, §16).
@@ -48,9 +47,8 @@ type Settings struct {
 
 // NodeSpec is one entry under `nodes`.
 type NodeSpec struct {
-	Name     string
-	Key      string
-	Channels int
+	Name string
+	Key  string
 }
 
 // PortSpec is one entry under `ports`. Port doubles as the wire-level port id.
@@ -91,8 +89,9 @@ type rawFile struct {
 }
 
 type rawNode struct {
-	Key      string `yaml:"key"`
-	Channels *int   `yaml:"channels"`
+	Key string `yaml:"key"`
+	// Channels is parsed only to warn: every node now uses one WebSocket.
+	Channels *int `yaml:"channels"`
 }
 
 type rawPort struct {
@@ -182,16 +181,12 @@ func Load(path string) (cfg *Config, warnings []string, err error) {
 			warn("nodes.%s: key already used by node %q — entry dropped", name, owner)
 			continue
 		}
-		channels := DefaultChannels
 		if rn.Channels != nil {
-			channels = *rn.Channels
-			if channels < 1 {
-				warn("nodes.%s: channels=%d is invalid, using %d", name, channels, DefaultChannels)
-				channels = DefaultChannels
-			}
+			warn("nodes.%s: `channels` is deprecated and ignored; each node uses one WebSocket "+
+				"and concurrency is capped by settings.max_streams_per_conn", name)
 		}
 		keyOwner[rn.Key] = name
-		cfg.Nodes[name] = &NodeSpec{Name: name, Key: rn.Key, Channels: channels}
+		cfg.Nodes[name] = &NodeSpec{Name: name, Key: rn.Key}
 		cfg.NodeOrder = append(cfg.NodeOrder, name)
 	}
 
@@ -237,8 +232,7 @@ func Load(path string) (cfg *Config, warnings []string, err error) {
 // NodeConfig builds the blob pushed to a node in `welcome` and
 // `reload_config` (§6). Returns nil if the node is not configured.
 func (c *Config) NodeConfig(node string) *protocol.NodeConfig {
-	spec, ok := c.Nodes[node]
-	if !ok {
+	if _, ok := c.Nodes[node]; !ok {
 		return nil
 	}
 	ports := map[string]string{}
@@ -249,7 +243,6 @@ func (c *Config) NodeConfig(node string) *protocol.NodeConfig {
 	}
 	return &protocol.NodeConfig{
 		Ports:             ports,
-		Channels:          spec.Channels,
 		Heartbeat:         protocol.Duration(c.Settings.Heartbeat),
 		DialTimeout:       protocol.Duration(c.Settings.DialTimeout),
 		MaxStreamsPerConn: c.Settings.MaxStreamsPerConn,

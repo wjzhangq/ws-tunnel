@@ -52,7 +52,6 @@ func TestStatusBeforeFirstHandshake(t *testing.T) {
 func TestStatusReflectsSessionState(t *testing.T) {
 	c := testClient()
 	c.setConfig(&protocol.NodeConfig{
-		Channels: 4,
 		Ports: map[string]string{
 			"15432": "127.0.0.1:5432",
 			"1980":  "127.0.0.1:80",
@@ -72,8 +71,8 @@ func TestStatusReflectsSessionState(t *testing.T) {
 	if st.Session != "sess-1" || !st.Draining {
 		t.Errorf("session/draining = %q/%v", st.Session, st.Draining)
 	}
-	if st.Channels.Configured != 4 || st.Channels.Online != 3 {
-		t.Errorf("channels = %+v, want 4 configured / 3 online", st.Channels)
+	if st.Channels.Configured != 1 || st.Channels.Online != 3 {
+		t.Errorf("channels = %+v, want 1 configured / 3 online", st.Channels)
 	}
 	if st.Streams.Active != 47 {
 		t.Errorf("active streams = %d, want 47", st.Streams.Active)
@@ -99,7 +98,7 @@ func TestStatusReflectsSessionState(t *testing.T) {
 
 func TestServeStatusRespondsAndShutsDown(t *testing.T) {
 	c := testClient()
-	c.setConfig(&protocol.NodeConfig{Channels: 2, Ports: map[string]string{"19080": "127.0.0.1:8080"}})
+	c.setConfig(&protocol.NodeConfig{Ports: map[string]string{"19080": "127.0.0.1:8080"}})
 	c.setSession("sess-2")
 
 	addr := freeAddr(t)
@@ -112,7 +111,7 @@ func TestServeStatusRespondsAndShutsDown(t *testing.T) {
 	if err := json.Unmarshal(body, &st); err != nil {
 		t.Fatalf("unmarshal %s: %v", body, err)
 	}
-	if st.Session != "sess-2" || st.Channels.Configured != 2 {
+	if st.Session != "sess-2" || st.Channels.Configured != 1 {
 		t.Errorf("served document = %+v", st)
 	}
 

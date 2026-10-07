@@ -41,7 +41,6 @@ func newTestSession(t *testing.T, maxStreams int, queueTimeout time.Duration) *N
 		cliMux.Close()
 	})
 	n := newNodeSession("node1", &protocol.NodeConfig{
-		Channels:          1,
 		MaxStreamsPerConn: maxStreams,
 	}, queueTimeout, &NodeStats{}, testLogger())
 	n.AttachMux(srvMux)

@@ -15,8 +15,8 @@ type Diff struct {
 	AddedPorts   []int // start a listener if the node is online
 	RemovedPorts []int // stop accepting, let in-flight conns finish
 
-	// ChangedNodes need a `reload_config` push but no reconnect: channels
-	// count, a remote address, an added/removed port, or a settings change.
+	// ChangedNodes need a `reload_config` push but no reconnect: a remote
+	// address, an added/removed port, or a settings change.
 	ChangedNodes []string
 
 	SettingsChanged bool

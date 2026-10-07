@@ -78,7 +78,6 @@ type NodeConfig struct {
 	// Ports maps the server-side listening port (decimal string, which is also
 	// the port id on the wire) to the client-local `host:port` to dial.
 	Ports             map[string]string `json:"ports"`
-	Channels          int               `json:"channels"`
 	Heartbeat         Duration          `json:"heartbeat"`
 	DialTimeout       Duration          `json:"dial_timeout"`
 	MaxStreamsPerConn int               `json:"max_streams_per_conn"`
@@ -91,7 +90,7 @@ func (c *NodeConfig) Equal(o *NodeConfig) bool {
 	if c == nil || o == nil {
 		return c == o
 	}
-	if c.Channels != o.Channels || c.Heartbeat != o.Heartbeat ||
+	if c.Heartbeat != o.Heartbeat ||
 		c.DialTimeout != o.DialTimeout || c.MaxStreamsPerConn != o.MaxStreamsPerConn ||
 		c.StreamWindow != o.StreamWindow {
 		return false
@@ -133,7 +132,6 @@ type Message struct {
 	// welcome
 	Session   string      `json:"session,omitempty"`
 	Heartbeat Duration    `json:"heartbeat,omitempty"`
-	Channels  int         `json:"channels,omitempty"`
 	Config    *NodeConfig `json:"config,omitempty"`
 
 	// ping / pong

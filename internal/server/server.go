@@ -325,7 +325,6 @@ func (s *Server) serveSession(ctx context.Context, c *websocket.Conn, spec *conf
 		Proto:     protocol.Version,
 		Session:   sess.ID,
 		Heartbeat: nodeCfg.Heartbeat,
-		Channels:  1,
 		Config:    nodeCfg,
 	}); err != nil {
 		s.registry.Unregister(sess, "welcome write failed: "+err.Error())
@@ -632,7 +631,7 @@ func (s *Server) pushConfig(node string, cfg *config.Config) {
 		s.log.Warn("reload_config push failed", "node", node, "err", err)
 		return
 	}
-	s.log.Info("reload_config pushed", "node", node, "ports", len(nodeCfg.Ports), "channels", nodeCfg.Channels)
+	s.log.Info("reload_config pushed", "node", node, "ports", len(nodeCfg.Ports))
 }
 
 // drainNode asks a node to stop taking new streams, waits for the in-flight

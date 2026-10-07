@@ -27,13 +27,12 @@ settings:
 nodes:
   node1:
     key: "xx1"
-    channels: 2
+    channels: 2       # deprecated: warned and ignored
   node2:
     key: "xx1"        # duplicate key: dropped, node1 wins
     channels: 3
   node3:
     key: "xx3"
-    channels: 0       # invalid: falls back to the default
 ports:
   19080:
     node: node1
@@ -60,9 +59,6 @@ ports:
 	}
 	if _, ok := cfg.Nodes["node2"]; ok {
 		t.Error("node2 should have been dropped for reusing node1's key")
-	}
-	if cfg.Nodes["node3"].Channels != DefaultChannels {
-		t.Errorf("channels=0 should fall back to %d, got %d", DefaultChannels, cfg.Nodes["node3"].Channels)
 	}
 	if cfg.Settings.Heartbeat != 5*time.Second {
 		t.Errorf("heartbeat not parsed: %v", cfg.Settings.Heartbeat)
@@ -144,7 +140,7 @@ ports:
 		t.Fatal(err)
 	}
 	nc := cfg.NodeConfig("node1")
-	if nc.Channels != 3 || len(nc.Ports) != 2 || nc.Ports["19080"] != "127.0.0.1:8080" {
+	if len(nc.Ports) != 2 || nc.Ports["19080"] != "127.0.0.1:8080" {
 		t.Fatalf("unexpected node config: %+v", nc)
 	}
 	if cfg.NodeByKey("xx1").Name != "node1" || cfg.NodeByKey("nope") != nil {
