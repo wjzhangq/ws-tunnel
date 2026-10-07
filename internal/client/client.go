@@ -6,6 +6,7 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -112,7 +113,7 @@ func (c *Client) runSession(ctx context.Context) error {
 
 	hctx, hcancel := context.WithTimeout(ctx, dialTimeout)
 	err = wsutil.WriteJSON(hctx, conn, &protocol.Message{
-		Type: protocol.TypeHello, Role: protocol.RoleControl, Node: c.Node, Key: c.Key,
+		Type: protocol.TypeHello, Proto: protocol.Version, Role: protocol.RoleControl, Node: c.Node, Key: c.Key,
 	})
 	if err == nil {
 		var msg *protocol.Message
@@ -120,6 +121,11 @@ func (c *Client) runSession(ctx context.Context) error {
 		if err == nil {
 			switch msg.Type {
 			case protocol.TypeWelcome:
+				if msg.Proto != protocol.Version {
+					err = fmt.Errorf("server speaks protocol %d, client needs %d; upgrade the server",
+						msg.Proto, protocol.Version)
+					break
+				}
 				if msg.Config == nil {
 					err = errors.New("welcome carried no config")
 					break

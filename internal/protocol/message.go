@@ -12,6 +12,11 @@ import (
 // WSPath is the HTTP path clients connect to on the server's `listen` address.
 const WSPath = "/ws"
 
+// Version is carried in `hello` and echoed in `welcome`. Version 2 is the
+// single-WebSocket mux; releases before it sent no version (0) and expected
+// separate data-role WebSockets, so the two must refuse each other.
+const Version = 2
+
 // Control message types (§6).
 const (
 	TypeHello        = "hello"
@@ -39,6 +44,7 @@ const (
 	ErrBadRequest = "bad_request"
 	ErrInternal   = "internal"
 	ErrDraining   = "draining"
+	ErrVersion    = "unsupported_version"
 )
 
 // Duration marshals as a Go duration string ("15s") so the JSON `config`
@@ -120,6 +126,9 @@ type Stats struct {
 // the wire stays readable when debugging with a WS inspector.
 type Message struct {
 	Type string `json:"type"`
+
+	// hello / welcome
+	Proto int `json:"proto,omitempty"`
 
 	// hello
 	Role string `json:"role,omitempty"`

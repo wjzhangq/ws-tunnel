@@ -243,6 +243,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.reject(c, protocol.ErrBadRequest, "expected hello")
 		return
 	}
+	if msg.Proto != protocol.Version {
+		s.log.Warn("protocol version mismatch", "remote", r.RemoteAddr, "node", msg.Node,
+			"client_proto", msg.Proto, "server_proto", protocol.Version)
+		s.reject(c, protocol.ErrVersion,
+			"server speaks protocol %d, client sent %d; upgrade the older side", protocol.Version, msg.Proto)
+		return
+	}
 
 	spec, err := s.authenticate(msg)
 	if err != nil {
@@ -317,6 +324,7 @@ func (s *Server) serveSession(ctx context.Context, c *websocket.Conn, spec *conf
 
 	if err := sess.SendControl(&protocol.Message{
 		Type:      protocol.TypeWelcome,
+		Proto:     protocol.Version,
 		Session:   sess.ID,
 		Heartbeat: nodeCfg.Heartbeat,
 		Channels:  1,

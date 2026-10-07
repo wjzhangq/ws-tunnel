@@ -15,8 +15,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"ws-tunnel/internal/client"
+	"ws-tunnel/internal/protocol"
 	"ws-tunnel/internal/server"
+	"ws-tunnel/internal/wsutil"
 )
 
 func freePort(t *testing.T) int {
@@ -382,6 +386,45 @@ ports:
 			return len(doc.Nodes) == 0 && len(doc.OfflineNodes) == 1
 		})
 	})
+}
+
+func TestOldProtocolHelloIsRefused(t *testing.T) {
+	wsPort := freePort(t)
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	body := fmt.Sprintf("listen: \"127.0.0.1:%d\"\nnodes:\n  node1: {key: \"good\"}\n", wsPort)
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := server.New(cfgPath, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = srv.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	url := fmt.Sprintf("ws://127.0.0.1:%d/ws", wsPort)
+	var conn *websocket.Conn
+	waitFor(t, "the ws entry point", 5*time.Second, func() bool {
+		conn, _, err = websocket.Dial(ctx, url, nil)
+		return err == nil
+	})
+	defer conn.CloseNow()
+
+	// A pre-mux client sends no proto field at all.
+	if err := wsutil.WriteJSON(ctx, conn, &protocol.Message{
+		Type: protocol.TypeHello, Role: protocol.RoleControl, Key: "good",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := wsutil.ReadJSON(ctx, conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.Type != protocol.TypeError || reply.Code != protocol.ErrVersion {
+		t.Fatalf("got %+v, want error %s", reply, protocol.ErrVersion)
+	}
 }
 
 func TestUnknownKeyIsRefused(t *testing.T) {
