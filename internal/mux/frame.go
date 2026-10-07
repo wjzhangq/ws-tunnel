@@ -25,9 +25,11 @@ const (
 )
 
 const (
-	// MaxPayload is the largest DATA body. It stays well under the WS read
-	// limit (1 MiB) so a hostile peer cannot force huge allocations per frame.
-	MaxPayload = 32 * 1024
+	// MaxPayload is the largest DATA body. All streams share one WebSocket
+	// writer, so this bounds how long a bulk stream holds it before a small
+	// frame from another stream gets a turn. It also stays well under the WS
+	// read limit (1 MiB) so a peer cannot force huge allocations per frame.
+	MaxPayload = 16 * 1024
 	// InitialWindow is the credit an opener may spend before OPEN_ACK tells it
 	// the acceptor's real receive window. It is part of the wire contract.
 	InitialWindow = 64 * 1024
