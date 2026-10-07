@@ -193,9 +193,6 @@ func (c *Client) controlLoop(ctx context.Context, sess *mux.Conn) error {
 			}
 		case msg := <-sess.Controls():
 			timer.Stop()
-			if msg == nil {
-				return errors.New("control channel closed")
-			}
 			switch msg.Type {
 			case protocol.TypePing:
 				_ = c.sendControl(&protocol.Message{Type: protocol.TypePong, Nonce: msg.Nonce, TS: msg.TS})

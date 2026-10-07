@@ -162,8 +162,7 @@ func halfCloseRoundTrip(t *testing.T, port int, payload []byte) []byte {
 	return got
 }
 
-// TestHalfCloseDeliversFIN guards the framed payload (§7.1, StreamVersion 0x02):
-// an external client that half-closes must still receive the reply, and the
+// TestHalfCloseDeliversFIN guards the mux FIN frame: an external client that half-closes must still receive the reply, and the
 // backend must see EOF rather than hanging until a timeout.
 func TestHalfCloseDeliversFIN(t *testing.T) {
 	port := startTunnel(t, drainThenReply(t, "drained"))
@@ -174,7 +173,7 @@ func TestHalfCloseDeliversFIN(t *testing.T) {
 }
 
 // TestHalfCloseLargePayload pushes enough bytes to span many frames in both
-// directions, checking the length-delimited framing reassembles exactly.
+// directions, checking DATA frames reassemble exactly.
 func TestHalfCloseLargePayload(t *testing.T) {
 	port := startTunnel(t, drainThenReply(t, "big"))
 

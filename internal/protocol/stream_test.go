@@ -2,65 +2,20 @@ package protocol
 
 import (
 	"bytes"
-	"errors"
-	"io"
 	"testing"
 )
 
-func TestStreamHeaderRoundTrip(t *testing.T) {
-	for _, port := range []int{1, 80, 127, 128, 1980, 19080, 65535} {
-		var buf bytes.Buffer
-		if err := WriteStreamHeader(&buf, port); err != nil {
-			t.Fatal(err)
+func TestAckResultLabels(t *testing.T) {
+	for status, want := range map[byte]string{
+		AckOK:             "ok",
+		AckPortNotAllowed: "not_allowed",
+		AckDialFailed:     "dial_failed",
+		AckRejected:       "rejected",
+		0x7f:              "rejected",
+	} {
+		if got := AckResult(status); got != want {
+			t.Errorf("AckResult(%#x) = %q, want %q", status, got, want)
 		}
-		payload := []byte("GET / HTTP/1.1\r\n")
-		buf.Write(payload)
-
-		got, err := ReadStreamHeader(&buf)
-		if err != nil {
-			t.Fatalf("port %d: %v", port, err)
-		}
-		if got != port {
-			t.Fatalf("port %d decoded as %d", port, got)
-		}
-		// The header reader must not swallow any payload byte.
-		rest, _ := io.ReadAll(&buf)
-		if !bytes.Equal(rest, payload) {
-			t.Fatalf("payload corrupted: %q", rest)
-		}
-	}
-}
-
-func TestStreamHeaderRejects(t *testing.T) {
-	// One past the current version: still unknown, and it stays unknown when
-	// StreamVersion is bumped again.
-	if _, err := ReadStreamHeader(bytes.NewReader([]byte{StreamVersion + 1, 0x01})); !errors.Is(err, ErrBadVersion) {
-		t.Fatalf("expected ErrBadVersion, got %v", err)
-	}
-	// Port id 0 is out of the 1..65535 range.
-	var buf bytes.Buffer
-	buf.WriteByte(StreamVersion)
-	buf.WriteByte(0x00)
-	if _, err := ReadStreamHeader(&buf); !errors.Is(err, ErrBadPortID) {
-		t.Fatalf("expected ErrBadPortID, got %v", err)
-	}
-}
-
-func TestAckRoundTrip(t *testing.T) {
-	var buf bytes.Buffer
-	if err := WriteAck(&buf, AckDialFailed); err != nil {
-		t.Fatal(err)
-	}
-	buf.WriteString("payload")
-	got, err := ReadAck(&buf)
-	if err != nil || got != AckDialFailed {
-		t.Fatalf("got %v %v", got, err)
-	}
-	if AckResult(got) != "dial_failed" {
-		t.Fatalf("unexpected result label %q", AckResult(got))
-	}
-	if rest, _ := io.ReadAll(&buf); string(rest) != "payload" {
-		t.Fatalf("payload corrupted: %q", rest)
 	}
 }
 

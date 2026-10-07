@@ -37,9 +37,7 @@ func newForwardFixture(t *testing.T, dialTimeout time.Duration) *forwardFixture 
 	srvMux := mux.New(t.Context(), a, mux.Server)
 	cliMux := mux.New(t.Context(), b, mux.Client)
 	sess.AttachMux(srvMux)
-	if err := srv.registry.Register(sess); err != nil {
-		t.Fatalf("register: %v", err)
-	}
+	srv.registry.Takeover(sess)
 	t.Cleanup(func() {
 		srvMux.Close()
 		cliMux.Close()

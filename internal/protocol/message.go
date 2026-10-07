@@ -1,6 +1,6 @@
-// Package protocol defines the wire format shared by tunnel-server and
-// tunnel-client: JSON control messages on the control channel, and the tiny
-// binary stream header / ack exchanged on every data stream.
+// Package protocol defines the JSON control messages shared by tunnel-server
+// and tunnel-client, plus the OPEN_ACK status codes. The binary stream frames
+// live in package mux.
 package protocol
 
 import (
@@ -30,17 +30,12 @@ const (
 	TypeError        = "error"
 )
 
-// Roles carried in `hello`.
-const (
-	RoleControl = "control"
-	RoleData    = "data"
-)
+// RoleControl is the only role carried in `hello`.
+const RoleControl = "control"
 
 // Error codes carried in `error` (§6 / §4).
 const (
 	ErrAuthFailed = "auth_failed"
-	ErrNodeBusy   = "node_busy"
-	ErrBadSession = "bad_session"
 	ErrBadRequest = "bad_request"
 	ErrInternal   = "internal"
 	ErrDraining   = "draining"
@@ -135,11 +130,10 @@ type Message struct {
 	Node string `json:"node,omitempty"`
 	Key  string `json:"key,omitempty"`
 
-	// hello (data role) / welcome
+	// welcome
 	Session   string      `json:"session,omitempty"`
 	Heartbeat Duration    `json:"heartbeat,omitempty"`
 	Channels  int         `json:"channels,omitempty"`
-	ChannelID int         `json:"channel_id,omitempty"`
 	Config    *NodeConfig `json:"config,omitempty"`
 
 	// ping / pong

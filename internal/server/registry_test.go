@@ -83,8 +83,8 @@ func TestTakeoverReplacesLiveSession(t *testing.T) {
 	r := newRegistry(testLogger())
 	a := newNodeSession("node1", &protocol.NodeConfig{MaxStreamsPerConn: 1}, time.Second, r.Stats("node1"), testLogger())
 	b := newNodeSession("node1", &protocol.NodeConfig{MaxStreamsPerConn: 1}, time.Second, r.Stats("node1"), testLogger())
-	if err := r.Register(a); err != nil {
-		t.Fatal(err)
+	if old := r.Takeover(a); old != nil {
+		t.Fatalf("first Takeover returned %v, want nil", old)
 	}
 	old := r.Takeover(b)
 	if old != a {
@@ -93,7 +93,9 @@ func TestTakeoverReplacesLiveSession(t *testing.T) {
 	if r.Get("node1") != b {
 		t.Fatal("live session was not replaced")
 	}
-	if err := r.Register(newNodeSession("node1", &protocol.NodeConfig{MaxStreamsPerConn: 1}, time.Second, r.Stats("node1"), testLogger())); err != ErrNodeBusy {
-		t.Fatalf("Register after Takeover: %v, want ErrNodeBusy", err)
+	// The displaced session's late exit must not evict its replacement.
+	r.Unregister(a, "replaced")
+	if r.Get("node1") != b {
+		t.Fatal("Unregister of the old session removed the new one")
 	}
 }

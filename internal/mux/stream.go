@@ -25,11 +25,11 @@ type Stream struct {
 	ackStatus byte
 	ackErr    error
 
-	mu       sync.Mutex
-	cond     *sync.Cond
-	buf      []byte
-	readEOF  bool
-	readErr  error
+	mu      sync.Mutex
+	cond    *sync.Cond
+	buf     []byte
+	readEOF bool
+	readErr error
 	// recvUsed is bytes received but not yet credited back with WINDOW;
 	// the peer may never push it past recvLimit. recvPending is the part of
 	// recvUsed already consumed by Read, returned once it reaches half of

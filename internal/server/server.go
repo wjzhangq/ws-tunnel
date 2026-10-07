@@ -261,8 +261,6 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	switch msg.Role {
 	case "", protocol.RoleControl:
 		s.serveSession(r.Context(), c, spec, r.RemoteAddr)
-	case protocol.RoleData:
-		s.reject(c, protocol.ErrBadRequest, "data-role WebSockets are no longer used; streams share the control connection")
 	default:
 		s.reject(c, protocol.ErrBadRequest, "unknown role %q", msg.Role)
 	}
@@ -390,9 +388,6 @@ func (s *Server) controlReadLoop(ctx context.Context, sess *NodeSession) string 
 			}
 		case msg := <-m.Controls():
 			timer.Stop()
-			if msg == nil {
-				return "control channel closed"
-			}
 			sess.Touch(0)
 			switch msg.Type {
 			case protocol.TypePing:

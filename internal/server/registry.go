@@ -9,19 +9,17 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"ws-tunnel/internal/mux"
 	"ws-tunnel/internal/protocol"
 )
 
 var (
-	ErrNodeBusy = errors.New("node already has a control channel")
-	// ErrSaturated means every data channel was at max_streams_per_conn for
-	// longer than queue_timeout (§8).
-	ErrSaturated = errors.New("all data channels saturated")
-	// ErrNoChannel means the node has no usable data channel right now.
-	ErrNoChannel = errors.New("no data channel online")
+	// ErrSaturated means the session was at max_streams_per_conn for longer
+	// than queue_timeout (§8).
+	ErrSaturated = errors.New("node session saturated")
+	// ErrNoChannel means the node has no live WebSocket right now.
+	ErrNoChannel = errors.New("node session not connected")
 	// ErrSessionClosed means the node went away while we were queued.
 	ErrSessionClosed = errors.New("node session closed")
 	// ErrDraining means the node is being drained and must not take new streams.
@@ -479,17 +477,6 @@ func (r *Registry) Stats(node string) *NodeStats {
 	return s
 }
 
-// Register installs a session, refusing the newcomer if one is already live.
-func (r *Registry) Register(sess *NodeSession) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, ok := r.live[sess.Name]; ok {
-		return ErrNodeBusy
-	}
-	r.installLocked(sess)
-	return nil
-}
-
 // Takeover installs sess as the live session, returning the previous one if
 // any. Listeners stay up; the caller is responsible for closing the old
 // session so its in-flight streams die without dropping the reverse ports.
@@ -555,16 +542,4 @@ func randomID() string {
 		return hex.EncodeToString([]byte(time.Now().Format(time.RFC3339Nano)))
 	}
 	return hex.EncodeToString(b[:])
-}
-
-// truncate caps s at n bytes without splitting a UTF-8 rune, which matters
-// because the result goes into a WebSocket close reason.
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return s[:n]
 }

@@ -18,7 +18,6 @@ import (
 
 var (
 	ErrClosed         = errors.New("mux connection closed")
-	ErrUnknownStr     = errors.New("unknown stream id")
 	ErrWindowExceeded = errors.New("peer sent more data than the stream window allows")
 	ErrIDsExhausted   = errors.New("mux stream ids exhausted; reconnect")
 )
@@ -48,7 +47,6 @@ type Conn struct {
 
 	closed    atomic.Bool
 	closeOnce sync.Once
-	closeErr  error
 
 	lastRead atomic.Int64 // unix nanos; any inbound frame
 }
@@ -177,7 +175,6 @@ func (c *Conn) Close() {
 
 func (c *Conn) closeWith(err error) {
 	c.closeOnce.Do(func() {
-		c.closeErr = err
 		c.closed.Store(true)
 		c.cancel()
 		c.mu.Lock()
